@@ -90,9 +90,10 @@ $imported = Sonar::run('nightly-import', function (Run $run) {
 `run()` measures the duration and sends `ok` when the callback returns; it returns whatever the callback returned. If
 the callback throws, it sends `fail` with the exception message as the log and rethrows the exception, so the job
 fails as before. Inside the callback you can set `setCount()`, `setValues()`, `setLog()` and `setStatus()`
-(for example `warn`). The Pulse counts at the time the job started. The buffer is resent when the Pulse is sent,
-after the job, so flushing never counts towards the measured duration. A Pulse counts at `ranAt`, and sonar refuses
-one more than 5 minutes in the future: keep the clock of the host right (such a Pulse is rejected with a 422).
+(for example `warn`). The Pulse counts at the time the job started. The buffer is resent before the job starts, so
+even a job that dies has flushed it, and the measured duration starts only after that. A Pulse counts at `ranAt`, and
+sonar refuses one more than 5 minutes in the future: keep the clock of the host right (such a Pulse is rejected with a
+422).
 
 ## Configuration
 
