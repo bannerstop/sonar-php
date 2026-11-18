@@ -1,0 +1,38 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Runs on the self-hosted runners. Every step is a `make` target that starts throwaway docker containers (php:<version>-cli
+# and composer:2), so the runner needs docker and nothing else; `make ci` does the same locally.
+jobs:
+  phpunit:
+    runs-on: [self-hosted, default]
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['7.2', '8.5']
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: PHPUnit on PHP ${{ matrix.php }}
+        run: make test-${{ matrix.php == '7.2' && '72' || '85' }}
+
+  static:
+    runs-on: [self-hosted, default]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: PHPStan
+        run: make phpstan
+      - name: php-cs-fixer
+        run: make cs

@@ -1,0 +1,11 @@
+/vendor/
+/composer.lock
+/.phpunit.result.cache
+/.phpunit.cache/
+/.php-cs-fixer.cache
+/tools/*/vendor/
+/tools/*/composer.lock
+/PR_BODY.md
+/.vendor/
+/composer-*.json
+/composer-*.lock

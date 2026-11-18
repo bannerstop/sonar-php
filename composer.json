@@ -1,0 +1,46 @@
+{
+    "name": "bannerstop/sonar-php",
+    "description": "Pulse client for sonar: report that a PHP job ran, with a short timeout, an on-disk buffer for outages and no dependencies",
+    "type": "library",
+    "keywords": ["sonar", "monitoring", "cron", "heartbeat", "pulse", "dead-man-switch"],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "bannerstop GmbH",
+            "homepage": "https://www.bannerstop.com"
+        }
+    ],
+    "require": {
+        "php": "^7.2 || ^8.0",
+        "ext-json": "*"
+    },
+    "require-dev": {
+        "nyholm/psr7": "^1.8",
+        "phpunit/phpunit": "^8.5.36 || ^9.6 || ^10.5 || ^11.0 || ^12.0",
+        "psr/http-client": "^1.0"
+    },
+    "suggest": {
+        "ext-curl": "The default transport; without it the stream transport is used",
+        "psr/http-client": "To send Pulses through a PSR-18 client with Psr18Transport",
+        "psr/http-factory": "PSR-17 request and stream factories for Psr18Transport",
+        "symfony/http-client": "A PSR-18 client (Psr18Client)",
+        "guzzlehttp/guzzle": "A PSR-18 client (^7.0)"
+    },
+    "autoload": {
+        "psr-4": {
+            "Bannerstop\\Sonar\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Bannerstop\\Sonar\\Tests\\": "tests/"
+        }
+    },
+    "bin": ["bin/sonar-flush"],
+    "config": {
+        "sort-packages": true
+    },
+    "scripts": {
+        "test": "phpunit"
+    }
+}

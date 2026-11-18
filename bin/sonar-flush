@@ -1,0 +1,33 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+// Resends the buffered Pulses of the client configured by SONAR_URL and SONAR_TOKEN, e.g. from a cron.
+// Prints a summary and always exits 0: a flush that finds sonar down must not make the cron fail.
+
+foreach ([__DIR__.'/../../../autoload.php', __DIR__.'/../vendor/autoload.php'] as $autoload) {
+    if (is_file($autoload)) {
+        require $autoload;
+        break;
+    }
+}
+if (!class_exists(\Bannerstop\Sonar\Sonar::class)) {
+    fwrite(STDERR, "sonar-flush: the Composer autoloader was not found.\n");
+    exit(0);
+}
+
+$report = \Bannerstop\Sonar\Sonar::flush();
+if (null === $report) {
+    echo "sonar-flush: SONAR_URL and SONAR_TOKEN are not set, nothing done.\n";
+    exit(0);
+}
+
+printf(
+    "sonar-flush: sent %d, dropped %d, %d left in the buffer%s\n",
+    $report->getSent(),
+    $report->getDropped(),
+    $report->getRemaining(),
+    $report->wasSkipped() ? ' (another flush is running, skipped)' : ($report->hasFailed() ? ' (sonar could not be reached or was busy)' : '')
+);
+exit(0);

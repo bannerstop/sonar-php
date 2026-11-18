@@ -1,0 +1,8 @@
+parameters:
+    level: 8
+    phpVersion: 70200
+    paths:
+        - src
+        - bin
+    bootstrapFiles:
+        - .vendor/85/autoload.php
