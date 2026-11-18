@@ -1,0 +1,51 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# This is a public repository: pull requests from forks run here, so every job uses GitHub-hosted runners and
+# never the self-hosted ones.
+jobs:
+  phpunit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['7.2', '8.5']
+        dependencies: [highest]
+        include:
+          - php: '7.2'
+            dependencies: lowest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+      - run: composer ${{ matrix.dependencies == 'lowest' && 'update --prefer-lowest' || 'install' }} --no-interaction --no-progress
+      - run: vendor/bin/phpunit
+
+  static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.5'
+          coverage: none
+      - run: composer install --no-interaction --no-progress
+      - run: composer install --no-interaction --no-progress -d tools/phpstan
+      - run: composer install --no-interaction --no-progress -d tools/php-cs-fixer
+      - run: tools/phpstan/vendor/bin/phpstan analyse --memory-limit=512M
+      - run: tools/php-cs-fixer/vendor/bin/php-cs-fixer fix --dry-run --diff
