@@ -51,7 +51,6 @@ final class OutageTest extends TestCase
         // the Main is back but failing
         $this->server->start();
         $this->server->answer('503');
-        usleep(1100000); // ranAt has second resolution in the file name only; this keeps the order obvious
         $sent[] = $client->pulse('job', ['count' => 2]);
         $sent[] = $client->pulse('job', ['count' => 3]);
         foreach ($sent as $result) {

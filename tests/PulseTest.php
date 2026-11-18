@@ -135,6 +135,33 @@ final class PulseTest extends TestCase
         self::assertSame(1, preg_match('//u', $log));
     }
 
+    public function testTheBodyStaysWithinWhatSonarTakesEvenWhenTheLogEscapesBadly(): void
+    {
+        $this->client()->pulse('job', ['log' => str_repeat("\"\n", 40000)]);
+
+        $request = $this->transport->getRequests()[0];
+        self::assertLessThanOrEqual(80 * 1024, strlen($request->getBody()));
+        self::assertNotSame('', $request->getJson()['log']);
+    }
+
+    public function testOptionalFieldsSonarWouldRefuseAreCleanedUpInsteadOfLosingThePulse(): void
+    {
+        $values = ['ok' => 1, 'nested' => ['a'], 'long' => str_repeat('x', 600)];
+        for ($i = 0; $i < 60; ++$i) {
+            $values['v'.$i] = $i;
+        }
+
+        $this->client()->pulse('job', ['status' => 'bogus', 'count' => -3, 'duration' => -1.5, 'values' => $values]);
+
+        $body = $this->transport->getRequests()[0]->getJson();
+        self::assertSame('ok', $body['status']);
+        self::assertArrayNotHasKey('count', $body);
+        self::assertSame(0, $body['duration']);
+        self::assertCount(50, $body['values']);
+        self::assertArrayNotHasKey('nested', $body['values']);
+        self::assertSame(500, strlen($body['values']['long']));
+    }
+
     public function testAcceptedWithPendingRegistrationCountsAsSent(): void
     {
         $this->transport->respondWith(202, '{"status":"pending"}');

@@ -136,6 +136,8 @@ final class RunTest extends TestCase
         });
 
         self::assertSame(42, $result);
+        self::assertCount(1, $this->transport->getRequests());
+        self::assertCount(1, glob($this->dir.'/buffer/*.json') ?: [], 'the Pulse waits in the buffer');
     }
 
     public function testTheBufferIsFlushedBeforeTheRunsPulseIsSent(): void

@@ -62,8 +62,12 @@ $result->getStatusCode();// the HTTP status, null without an answer
 $result->getId();        // the UUID of this Pulse
 ```
 
+Optional fields sonar would refuse are cleaned up first (unknown `status` becomes `ok`, negative `count` is left out,
+`duration` is clamped, `values` is cut to 50 scalars of 500 characters, an oversized `log` is shortened), so they
+never cost the Pulse.
+
 A Pulse is `rejected` when sonar refuses it for good (401 wrong token, 403 not allowed, 404 unknown check, 422 invalid
-body, and any other 4xx) or when the client cannot work (not configured, buffer directory not writable). The client
+body, and any other 4xx such as 413: a resend cannot change them) or when the client cannot work (not configured, buffer directory not writable). The client
 writes one line to `error_log()` with the status and the problem title, never the token.
 
 ## Measuring a job: `run()`
@@ -83,7 +87,8 @@ $imported = Sonar::run('nightly-import', function (Run $run) {
 `run()` measures the duration and sends `ok` when the callback returns; it returns whatever the callback returned. If
 the callback throws, it sends `fail` with the exception message as the log and rethrows the exception, so the job
 fails as before. Inside the callback you can set `setCount()`, `setValues()`, `setLog()` and `setStatus()`
-(for example `warn`). The Pulse counts at the time the job started.
+(for example `warn`). The Pulse counts at the time the job started. The buffer is resent when the Pulse is sent,
+after the job, so flushing never counts towards the measured duration.
 
 ## Configuration
 
@@ -98,7 +103,8 @@ $client->pulse('nightly-import');
 $client->run('nightly-import', function ($run) { /* ... */ });
 ```
 
-Without any configuration `Sonar::pulse()` is rejected (and logged) and `Sonar::run()` just runs the job.
+`Sonar::configure()` and the `SonarClient` constructor throw `InvalidArgumentException` for an empty URL or token
+and for unknown options: that is a programming error, found at bootstrap. Without any configuration `Sonar::pulse()` is rejected (and logged) and `Sonar::run()` just runs the job.
 
 | Option           | Default                                  | Meaning                                                              |
 |------------------|------------------------------------------|----------------------------------------------------------------------|

@@ -24,6 +24,9 @@ use Bannerstop\Sonar\Transport\Transport;
 final class SonarClient
 {
     private const LOG_BYTES = 65536;
+    private const MAX_BODY_BYTES = 75000; // sonar refuses more than 80 KB
+    private const MAX_VALUES = 50;
+    private const MAX_DURATION = 4294967;
     private const OPTIONS = ['connectTimeout', 'timeout', 'transport', 'bufferDir', 'bufferLimit', 'flushLimit', 'flushSeconds', 'clock'];
 
     /** @var string */
@@ -139,10 +142,7 @@ final class SonarClient
         try {
             $body = $this->body($fields, $ranAt);
             $id = $body['id'];
-            $json = json_encode($body, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
-            if (false === $json) {
-                throw new \RuntimeException('The Pulse cannot be encoded as JSON: '.json_last_error_msg());
-            }
+            $json = $this->encode($body);
             $flush = $this->flush($this->flushLimit, $this->flushSeconds);
             $result = $flush->hasFailed()
                 ? PulseResult::buffered($id, null, 'Sonar could not be reached, so the Pulse was not even tried.')
@@ -157,6 +157,25 @@ final class SonarClient
 
             return PulseResult::rejected($id, null, 'Dropped, the Pulse could not be sent or buffered: '.$e->getMessage());
         }
+    }
+
+    /**
+     * The JSON body; a log whose escaped form would push it past what sonar takes is cut further.
+     *
+     * @param array<string, mixed> $body
+     */
+    private function encode(array &$body): string
+    {
+        do {
+            $json = json_encode($body, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+            if (false === $json) {
+                throw new \RuntimeException('The Pulse cannot be encoded as JSON: '.json_last_error_msg());
+            }
+            if (strlen($json) <= self::MAX_BODY_BYTES || !isset($body['log']) || '' === $body['log']) {
+                return $json;
+            }
+            $body['log'] = self::tail(substr($body['log'], -(int) (strlen($body['log']) * 0.75)));
+        } while (true);
     }
 
     /**
@@ -202,7 +221,7 @@ final class SonarClient
         $problem = json_decode($body);
         $title = $problem instanceof \stdClass && is_string($problem->title ?? null) ? $problem->title : '';
 
-        return mb_substr($title, 0, 200);
+        return substr($title, 0, 200);
     }
 
     /**
@@ -212,25 +231,65 @@ final class SonarClient
      */
     private function body(array $fields, \DateTimeImmutable $ranAt): array
     {
+        $status = $fields['status'] ?? 'ok';
+        if (!in_array($status, ['ok', 'warn', 'fail'], true)) {
+            Log::error(sprintf('Ignored the unknown status "%s", sent ok.', is_scalar($status) ? (string) $status : gettype($status)));
+            $status = 'ok';
+        }
         $body = [
             'id' => self::uuid(),
             'ranAt' => $ranAt->format('Y-m-d\TH:i:s.uP'),
-            'status' => $fields['status'] ?? 'ok',
+            'status' => $status,
         ];
-        if (isset($fields['count'])) {
+        // Optional fields that sonar would refuse (422) are cleaned up instead, so they never cost the whole Pulse.
+        if (isset($fields['count']) && (int) $fields['count'] >= 0) {
             $body['count'] = (int) $fields['count'];
         }
         if (isset($fields['duration'])) {
-            $body['duration'] = round((float) $fields['duration'], 3);
+            $body['duration'] = round(max(0.0, min((float) $fields['duration'], self::MAX_DURATION)), 3);
         }
-        if (isset($fields['values']) && [] !== $fields['values']) {
-            $body['values'] = (object) $fields['values'];
+        $values = isset($fields['values']) && is_array($fields['values']) ? self::values($fields['values']) : [];
+        if ([] !== $values) {
+            $body['values'] = (object) $values;
         }
         if (isset($fields['log'])) {
             $body['log'] = self::tail((string) $fields['log']);
         }
 
         return $body;
+    }
+
+    /**
+     * At most 50 scalar values; longer strings are cut to 500 characters.
+     *
+     * @param array<mixed> $values
+     *
+     * @return array<string, bool|int|float|string>
+     */
+    private static function values(array $values): array
+    {
+        $clean = [];
+        foreach ($values as $name => $value) {
+            if (count($clean) >= self::MAX_VALUES) {
+                break;
+            }
+            if (is_string($value)) {
+                $value = self::cut($value, 500);
+            }
+            if (is_bool($value) || is_int($value) || is_float($value) || is_string($value)) {
+                $clean[(string) $name] = $value;
+            }
+        }
+
+        return $clean;
+    }
+
+    /**
+     * A string of at most $characters characters (bytes without ext-mbstring).
+     */
+    private static function cut(string $value, int $characters): string
+    {
+        return function_exists('mb_substr') ? mb_substr($value, 0, $characters) : substr($value, 0, $characters);
     }
 
     /**
