@@ -6,8 +6,8 @@ declare(strict_types=1);
 // Resends the buffered Pulses of the client configured by SONAR_URL and SONAR_TOKEN, e.g. from a cron.
 // Prints a summary and always exits 0: a flush that finds sonar down must not make the cron fail.
 
-foreach ([__DIR__.'/../../../autoload.php', __DIR__.'/../vendor/autoload.php'] as $autoload) {
-    if (is_file($autoload)) {
+foreach ([isset($_composer_autoload_path) ? $_composer_autoload_path : null, __DIR__.'/../../../autoload.php', __DIR__.'/../vendor/autoload.php'] as $autoload) {
+    if (null !== $autoload && is_file($autoload)) {
         require $autoload;
         break;
     }
