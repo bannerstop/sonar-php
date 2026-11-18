@@ -27,6 +27,10 @@ if (0 === strpos($mode, 'sleep:')) {
     list(, $milliseconds, $status) = explode(':', $mode) + [null, 0, 202];
     usleep((int) $milliseconds * 1000);
 }
+if (0 === strpos($mode, 'retry:')) {
+    list(, $status, $seconds) = explode(':', $mode);
+    header('Retry-After: '.$seconds);
+}
 http_response_code((int) $status);
 header('Content-Type: application/json');
 echo 202 === (int) $status ? '{"status":"accepted"}' : '{"title":"Stub answered '.(int) $status.'"}';

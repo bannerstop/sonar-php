@@ -44,6 +44,11 @@ final class Psr18Transport implements Transport
             throw new TransportException($e->getMessage(), 0, $e);
         }
 
-        return new TransportResponse($response->getStatusCode(), (string) $response->getBody());
+        $headers = [];
+        foreach (array_keys($response->getHeaders()) as $name) {
+            $headers[(string) $name] = $response->getHeaderLine((string) $name);
+        }
+
+        return new TransportResponse($response->getStatusCode(), (string) $response->getBody(), $headers);
     }
 }

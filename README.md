@@ -51,7 +51,7 @@ Sonar::pulse('nightly-import', [
 | Outcome    | Meaning                                                                                       |
 |------------|-----------------------------------------------------------------------------------------------|
 | `sent`     | sonar accepted it (any 2xx, including `202` for a check name sonar has not seen yet).         |
-| `buffered` | sonar did not answer in time or was busy (network error, timeout, 5xx, 429). It will be resent. |
+| `buffered` | sonar did not answer in time or was busy (network error, timeout, 5xx, 429, 408, 425) or answered with a redirect (3xx, which means the URL is wrong). It will be resent. |
 | `rejected` | It will never arrive and was dropped (see below). `getMessage()` says why.                    |
 
 ```php
@@ -62,12 +62,15 @@ $result->getStatusCode();// the HTTP status, null without an answer
 $result->getId();        // the UUID of this Pulse
 ```
 
-Optional fields sonar would refuse are cleaned up first (unknown `status` becomes `ok`, negative `count` is left out,
-`duration` is clamped, `values` is cut to 50 scalars of 500 characters, an oversized `log` is shortened), so they
-never cost the Pulse.
+Invalid optional fields are left out, each with one `error_log()` line, and the Pulse is still sent: `count` has to be
+an integer of 0 or more, `duration` a number of seconds from 0 to 4294967, `values` at most 50 numbers, flags or
+strings of at most 500 characters. A `log` over 64 KB is cut to its end. An unknown `status` is different: the Pulse
+is rejected locally and nothing is sent. Check names are single path segments: an empty name or one with a `/` is
+rejected locally too.
 
 A Pulse is `rejected` when sonar refuses it for good (401 wrong token, 403 not allowed, 404 unknown check, 422 invalid
-body, and any other 4xx such as 413: a resend cannot change them) or when the client cannot work (not configured, buffer directory not writable). The client
+body, and any other 4xx such as 413: a resend cannot change them) or when the client itself failed: not configured, a status or check name that cannot be valid, or no way to buffer a
+Pulse that sonar did not take (buffer directory not writable). Read `getMessage()` to tell them apart. The client
 writes one line to `error_log()` with the status and the problem title, never the token.
 
 ## Measuring a job: `run()`
@@ -88,11 +91,12 @@ $imported = Sonar::run('nightly-import', function (Run $run) {
 the callback throws, it sends `fail` with the exception message as the log and rethrows the exception, so the job
 fails as before. Inside the callback you can set `setCount()`, `setValues()`, `setLog()` and `setStatus()`
 (for example `warn`). The Pulse counts at the time the job started. The buffer is resent when the Pulse is sent,
-after the job, so flushing never counts towards the measured duration.
+after the job, so flushing never counts towards the measured duration. A Pulse counts at `ranAt`, and sonar refuses
+one more than 5 minutes in the future: keep the clock of the host right (such a Pulse is rejected with a 422).
 
 ## Configuration
 
-`Sonar` builds one client on first use from `SONAR_URL` and `SONAR_TOKEN`. To configure it explicitly (or to wire a
+`Sonar` builds one client on first use from `SONAR_URL`, `SONAR_TOKEN` and optionally `SONAR_BUFFER_DIR`. To configure it explicitly (or to wire a
 client through your DI container), use `Sonar::configure()` or build a `SonarClient` yourself:
 
 ```php
@@ -115,12 +119,18 @@ and for unknown options: that is a programming error, found at bootstrap. Withou
 | `bufferLimit`    | `1000`                                   | Most Pulses kept; the oldest are dropped (with an `error_log()` line). |
 | `flushLimit`     | `50`                                     | Most buffered Pulses one call resends.                               |
 | `flushSeconds`   | `3.0`                                    | Most seconds one call spends resending.                              |
+| `clock`          | the system clock                         | A callable returning a `DateTimeImmutable`; for tests only.          |
 
 ## The buffer
 
-Every `pulse()` and `run()` first resends the buffer, oldest first, within its budget (50 Pulses or 3 s) and stopping
-at the first failure. If that flush found sonar down, the new Pulse goes straight to the buffer instead of waiting on
+Every `pulse()` and `run()` first resends the buffer (`run()` before the job starts, so even a job that dies has
+triggered it), oldest first, within its budget (50 Pulses or 3 s) and stopping at the first failure. If that flush found sonar down, the new Pulse goes straight to the buffer instead of waiting on
 another timeout. Then the new Pulse is sent. There is no daemon.
+
+sonar limits the Pulses per token (a burst of about 20, then one per second). A large backlog therefore drains over
+several calls or `sonar-flush` runs: when sonar answers 429 the flush stops and the rest waits. If an answer of 429
+or 503 carries a `Retry-After` (at most one hour is honoured), nothing is sent from this buffer until it is over:
+new Pulses are buffered without a request.
 
 - **Location:** `sys_get_temp_dir()/sonar-php/<hash of URL and token>/`, so two tokens on one host never mix. Set
   `bufferDir` to change it. The directory is created with mode `0700`; run all jobs that share a token as the same
@@ -143,10 +153,10 @@ A job that rarely runs would only resend its buffer at its next run. To resend s
 a cron, with the same `SONAR_URL` and `SONAR_TOKEN` (and the same user) as the job:
 
 ```
-*/5 * * * * cd /path/to/project && vendor/bin/sonar-flush
+*/5 * * * * cd /path/to/project && SONAR_BUFFER_DIR=/var/lib/myapp/sonar vendor/bin/sonar-flush
 ```
 
-It prints a summary (`sent 2, dropped 0, 0 left in the buffer`) and always exits 0, even when sonar is down.
+It reads `SONAR_BUFFER_DIR` too, so a job configured with a `bufferDir` can be flushed from the cron. It prints a summary (`sent 2, dropped 0, 0 left in the buffer`) and always exits 0, even when sonar is down.
 
 ## Transports
 

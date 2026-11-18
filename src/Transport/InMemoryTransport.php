@@ -24,11 +24,13 @@ final class InMemoryTransport implements Transport
     /**
      * The next answer, after those already programmed.
      *
+     * @param array<string, string> $headers
+     *
      * @return $this
      */
-    public function respondWith(int $status, string $body = ''): self
+    public function respondWith(int $status, string $body = '', array $headers = []): self
     {
-        $this->queue[] = new TransportResponse($status, $body);
+        $this->queue[] = new TransportResponse($status, $body, $headers);
 
         return $this;
     }

@@ -75,6 +75,36 @@ final class SonarTest extends TestCase
         self::assertStringContainsString('SONAR_URL', $this->capturedErrorLog());
     }
 
+    public function testTheMissingConfigurationIsLoggedOncePerProcess(): void
+    {
+        $this->captureErrorLog($this->dir.'/php-error.log');
+
+        Sonar::pulse('check');
+        Sonar::pulse('check');
+        Sonar::run('check', function (Run $run) {
+        });
+
+        self::assertSame(1, substr_count($this->capturedErrorLog(), 'SONAR_URL'));
+    }
+
+    public function testTheBufferDirComesFromTheEnvironmentToo(): void
+    {
+        $transport = new InMemoryTransport();
+        putenv('SONAR_URL=https://sonar.example.com');
+        putenv('SONAR_TOKEN=env-token');
+        putenv('SONAR_BUFFER_DIR='.$this->dir.'/env-buffer');
+        try {
+            Sonar::configure(null, null, ['transport' => $transport]);
+            $transport->failWith();
+
+            Sonar::pulse('check');
+        } finally {
+            putenv('SONAR_BUFFER_DIR');
+        }
+
+        self::assertCount(1, glob($this->dir.'/env-buffer/*.json') ?: []);
+    }
+
     public function testWithoutConfigurationRunStillRunsTheJob(): void
     {
         $this->captureErrorLog($this->dir.'/php-error.log');

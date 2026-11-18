@@ -26,7 +26,7 @@ final class Psr18TransportTest extends TestCase
             {
                 $this->request = $request;
 
-                return new Response(422, [], '{"title":"Invented"}');
+                return new Response(422, ['Retry-After' => '30'], '{"title":"Invented"}');
             }
         };
         $factory = new Psr17Factory();
@@ -43,6 +43,7 @@ final class Psr18TransportTest extends TestCase
         self::assertSame('application/json', $client->request->getHeaderLine('Content-Type'));
         self::assertSame('{"id":"x"}', (string) $client->request->getBody());
         self::assertSame(422, $response->getStatusCode());
+        self::assertSame('30', $response->getHeader('Retry-After'));
         self::assertSame('{"title":"Invented"}', $response->getBody());
     }
 

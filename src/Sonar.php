@@ -14,8 +14,12 @@ final class Sonar
     /** @var SonarClient|null */
     private static $client;
 
+    /** @var bool */
+    private static $loggedNotConfigured = false;
+
     /**
-     * Builds the client explicitly. Without a URL or token the environment variables SONAR_URL and SONAR_TOKEN are used.
+     * Builds the client explicitly. Without a URL or token the environment variables SONAR_URL and SONAR_TOKEN are
+     * used; SONAR_BUFFER_DIR sets the `bufferDir` option when the options do not.
      *
      * @param array<string, mixed> $options see SonarClient
      *
@@ -23,6 +27,10 @@ final class Sonar
      */
     public static function configure(?string $url = null, ?string $token = null, array $options = []): void
     {
+        $bufferDir = getenv('SONAR_BUFFER_DIR');
+        if (!isset($options['bufferDir']) && false !== $bufferDir && '' !== $bufferDir) {
+            $options['bufferDir'] = $bufferDir;
+        }
         self::$client = new SonarClient(
             $url ?? self::env('SONAR_URL', 'SONAR_URL and SONAR_TOKEN are not set; configure the client or the environment.'),
             $token ?? self::env('SONAR_TOKEN', 'SONAR_URL and SONAR_TOKEN are not set; configure the client or the environment.'),
@@ -71,6 +79,7 @@ final class Sonar
     public static function reset(): void
     {
         self::$client = null;
+        self::$loggedNotConfigured = false;
     }
 
     private static function tryClient(): ?SonarClient
@@ -79,7 +88,10 @@ final class Sonar
             try {
                 self::configure();
             } catch (\Throwable $e) {
-                Log::error($e->getMessage());
+                if (!self::$loggedNotConfigured) {
+                    self::$loggedNotConfigured = true;
+                    Log::error($e->getMessage());
+                }
 
                 return null;
             }

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Bannerstop\Sonar\Tests;
 
 use Bannerstop\Sonar\SonarClient;
+use Bannerstop\Sonar\Tests\Support\Process;
 use Bannerstop\Sonar\Tests\Support\StubServer;
 use Bannerstop\Sonar\Tests\Support\TempDir;
 use PHPUnit\Framework\TestCase;
@@ -20,23 +21,21 @@ final class FlushCommandTest extends TestCase
     /** @var string */
     private $token;
 
-    /** @var list<string> */
-    private $buffersBefore;
+    /** @var string */
+    private $dir;
 
     protected function setUp(): void
     {
         $this->server = new StubServer();
         $this->server->start();
         $this->token = 'token-'.bin2hex(random_bytes(4));
-        $this->buffersBefore = glob(sys_get_temp_dir().'/sonar-php/*', GLOB_ONLYDIR) ?: [];
+        $this->dir = TempDir::create();
     }
 
     protected function tearDown(): void
     {
         $this->server->stop();
-        foreach (array_diff(glob(sys_get_temp_dir().'/sonar-php/*', GLOB_ONLYDIR) ?: [], $this->buffersBefore) as $buffer) {
-            TempDir::remove($buffer);
-        }
+        TempDir::remove($this->dir);
     }
 
     /**
@@ -44,22 +43,17 @@ final class FlushCommandTest extends TestCase
      */
     private function runCommand(): array
     {
-        $autoload = dirname((string) (new \ReflectionClass(\Composer\Autoload\ClassLoader::class))->getFileName(), 2).'/autoload.php';
-        $command = implode(' ', array_map('escapeshellarg', [PHP_BINARY, '-d', 'auto_prepend_file='.$autoload, dirname(__DIR__).'/bin/sonar-flush']));
-        $pipes = [];
-        $process = proc_open($command, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null, array_merge(getenv(), [
+        return (new Process([PHP_BINARY, dirname(__DIR__).'/bin/sonar-flush'], [
             'SONAR_URL' => $this->server->getUrl(),
             'SONAR_TOKEN' => $this->token,
-        ]));
-        $output = (string) stream_get_contents($pipes[1]).(string) stream_get_contents($pipes[2]);
-
-        return [proc_close($process), $output];
+            'SONAR_BUFFER_DIR' => $this->dir.'/buffer',
+        ]))->wait();
     }
 
     public function testItResendsTheBufferOfTheClientFromTheEnvironment(): void
     {
         $this->server->answer('503');
-        $client = new SonarClient($this->server->getUrl(), $this->token);
+        $client = new SonarClient($this->server->getUrl(), $this->token, ['bufferDir' => $this->dir.'/buffer']);
         $first = $client->pulse('job');
         $second = $client->pulse('job');
         $this->server->forgetRequests();
@@ -78,7 +72,7 @@ final class FlushCommandTest extends TestCase
     public function testItExitsWithZeroEvenWhenSonarIsDown(): void
     {
         $this->server->answer('503');
-        (new SonarClient($this->server->getUrl(), $this->token))->pulse('job');
+        (new SonarClient($this->server->getUrl(), $this->token, ['bufferDir' => $this->dir.'/buffer']))->pulse('job');
 
         list($exit, $output) = $this->runCommand();
 

@@ -7,6 +7,7 @@ namespace Bannerstop\Sonar;
 use Bannerstop\Sonar\Transport\CurlTransport;
 use Bannerstop\Sonar\Transport\StreamTransport;
 use Bannerstop\Sonar\Transport\Transport;
+use Bannerstop\Sonar\Transport\TransportResponse;
 
 /**
  * Sends Pulses to sonar. Nothing here throws into the job: a Pulse that cannot be delivered is buffered on disk
@@ -19,14 +20,16 @@ use Bannerstop\Sonar\Transport\Transport;
  * - bufferDir (string): defaults to sys_get_temp_dir()/sonar-php/<hash of url and token>
  * - bufferLimit (int, 1000): the most Pulses kept; the oldest are dropped beyond it
  * - flushLimit (int, 50) and flushSeconds (float, 3.0): what one call may spend on resending the buffer
- * - clock (callable returning DateTimeImmutable): for tests
+ * - clock (callable returning DateTimeImmutable): for tests only
  */
 final class SonarClient
 {
     private const LOG_BYTES = 65536;
     private const MAX_BODY_BYTES = 75000; // sonar refuses more than 80 KB
     private const MAX_VALUES = 50;
+    private const MAX_STRING = 500;
     private const MAX_DURATION = 4294967;
+    private const MAX_RETRY_AFTER = 3600;
     private const OPTIONS = ['connectTimeout', 'timeout', 'transport', 'bufferDir', 'bufferLimit', 'flushLimit', 'flushSeconds', 'clock'];
 
     /** @var string */
@@ -83,18 +86,19 @@ final class SonarClient
     /**
      * Sends a Pulse: "this job ran". The buffer is resent first.
      *
-     * @param array<string, mixed> $fields status (ok, warn, fail; default ok), count, duration (seconds), values
-     *                                     (name => scalar), log (the tail is kept)
+     * @param array<string, mixed> $fields status (ok, warn, fail; default ok), count (int >= 0), duration (seconds),
+     *                                     values (name => scalar, at most 50), log (the tail is kept). An invalid
+     *                                     optional field is left out and logged; an unknown status rejects the Pulse.
      */
     public function pulse(string $check, array $fields = []): PulseResult
     {
-        return $this->pulseAt($check, $fields, $this->now());
+        return $this->send($check, $fields, $this->now(), false);
     }
 
     /**
-     * Runs the job, measures how long it takes and sends the Pulse: ok when it returns, fail with the exception
-     * message as the log when it throws (the exception is rethrown). The job can set count, values, log and status
-     * on the Run it gets. The Pulse counts at the time the job started.
+     * Resends the buffer, runs the job, measures how long it takes and sends the Pulse: ok when it returns, fail
+     * with the exception message as the log when it throws (the exception is rethrown). The job can set count,
+     * values, log and status on the Run it gets. The Pulse counts at the time the job started.
      *
      * @param callable(Run): mixed $job
      *
@@ -102,17 +106,18 @@ final class SonarClient
      */
     public function run(string $check, callable $job)
     {
+        $blocked = $this->resend();
         $run = new Run();
         $started = $this->now();
         try {
             $return = $job($run);
         } catch (\Throwable $e) {
-            $run->setStatus('fail')->setLog($e->getMessage());
-            $this->pulseAt($check, $run->toFields() + ['duration' => $this->secondsSince($started)], $started);
+            $run->setStatus(Status::FAIL)->setLog($e->getMessage());
+            $this->send($check, $run->toFields() + ['duration' => $this->secondsSince($started)], $started, $blocked);
 
             throw $e;
         }
-        $this->pulseAt($check, $run->toFields() + ['duration' => $this->secondsSince($started)], $started);
+        $this->send($check, $run->toFields() + ['duration' => $this->secondsSince($started)], $started, $blocked);
 
         return $return;
     }
@@ -134,21 +139,41 @@ final class SonarClient
     }
 
     /**
-     * @param array<string, mixed> $fields
+     * Resends the buffer within the budget of one call.
+     *
+     * @return string|null why a new Pulse should not be sent now (it is buffered instead), null when it can be
      */
-    private function pulseAt(string $check, array $fields, \DateTimeImmutable $ranAt): PulseResult
+    private function resend(): ?string
+    {
+        if ($this->buffer->backedOffUntil() > $this->buffer->now()) {
+            return 'Sonar asked to wait (Retry-After), so the Pulse was not sent.';
+        }
+
+        return $this->flush($this->flushLimit, $this->flushSeconds)->hasFailed()
+            ? 'Sonar could not be reached, so the Pulse was not even tried.'
+            : null;
+    }
+
+    /**
+     * @param array<string, mixed> $fields
+     * @param string|null|false    $blocked the outcome of resend() when the caller already did it, false when not
+     */
+    private function send(string $check, array $fields, \DateTimeImmutable $ranAt, $blocked): PulseResult
     {
         $id = null;
         try {
-            $body = $this->body($fields, $ranAt);
+            if ('' === $check || false !== strpos($check, '/')) {
+                return $this->refuse(null, sprintf('The check name "%s" is empty or contains a slash; sonar names are single path segments.', $check));
+            }
+            if (isset($fields['status']) && !Status::isValid($fields['status'])) {
+                return $this->refuse(null, 'The status has to be one of ok, warn, fail.');
+            }
+            $body = $this->fit($this->body($check, $fields, $ranAt));
             $id = $body['id'];
-            $json = $this->encode($body);
-            $flush = $this->flush($this->flushLimit, $this->flushSeconds);
-            $result = $flush->hasFailed()
-                ? PulseResult::buffered($id, null, 'Sonar could not be reached, so the Pulse was not even tried.')
-                : $this->deliver($check, $json, $id);
+            $blocked = false === $blocked ? $this->resend() : $blocked;
+            $result = null === $blocked ? $this->deliver($check, Json::encode($body), $id) : PulseResult::buffered($id, null, $blocked);
             if ($result->isBuffered()) {
-                $this->store($check, $body, $ranAt);
+                $this->buffer->add($check, $body, $ranAt);
             }
 
             return $result;
@@ -159,33 +184,11 @@ final class SonarClient
         }
     }
 
-    /**
-     * The JSON body; a log whose escaped form would push it past what sonar takes is cut further.
-     *
-     * @param array<string, mixed> $body
-     */
-    private function encode(array &$body): string
+    private function refuse(?string $id, string $message): PulseResult
     {
-        do {
-            $json = json_encode($body, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
-            if (false === $json) {
-                throw new \RuntimeException('The Pulse cannot be encoded as JSON: '.json_last_error_msg());
-            }
-            if (strlen($json) <= self::MAX_BODY_BYTES || !isset($body['log']) || '' === $body['log']) {
-                return $json;
-            }
-            $body['log'] = self::tail(substr($body['log'], -(int) (strlen($body['log']) * 0.75)));
-        } while (true);
-    }
+        Log::error('Pulse dropped: '.$message);
 
-    /**
-     * @param array<string, mixed> $body
-     *
-     * @throws \RuntimeException
-     */
-    private function store(string $check, array $body, \DateTimeImmutable $ranAt): void
-    {
-        $this->buffer->add($check, $body, $ranAt);
+        return PulseResult::rejected($id, null, 'Dropped: '.$message);
     }
 
     private function deliver(string $check, string $json, ?string $id): PulseResult
@@ -205,15 +208,46 @@ final class SonarClient
         if ($status >= 200 && $status < 300) {
             return PulseResult::sent($id, $status);
         }
-        if ($status >= 500 || 429 === $status) {
+        // Temporary: sonar busy or down, or a redirect, which says the URL is wrong, not that the Pulse is.
+        if ($status >= 500 || $status < 400 || in_array($status, [408, 425, 429], true)) {
+            if (429 === $status || 503 === $status) {
+                $this->backOff($response);
+            }
+
             return PulseResult::buffered($id, $status, 'Sonar answered '.$status.'.');
         }
-        // 401, 403, 404, 422, and any other answer a resend cannot change
-        $title = $this->problemTitle($response->getBody());
-        $message = trim($status.' '.$title);
+        // 401, 403, 404, 422, and any other 4xx: a resend cannot change them
+        $message = trim($status.' '.$this->problemTitle($response->getBody()));
         Log::error(sprintf('Pulse "%s" was refused and dropped: %s', $check, $message));
 
         return PulseResult::rejected($id, $status, 'Refused by sonar: '.$message);
+    }
+
+    /**
+     * Honours Retry-After (seconds or an HTTP date, at most an hour): nothing is sent until then.
+     */
+    private function backOff(TransportResponse $response): void
+    {
+        $header = $response->getHeader('Retry-After');
+        if (null === $header || '' === trim($header)) {
+            return;
+        }
+        $header = trim($header);
+        $now = $this->buffer->now();
+        if (ctype_digit($header)) {
+            $wait = (float) $header;
+        } else {
+            $date = strtotime($header);
+            $wait = false === $date ? 0.0 : $date - $now;
+        }
+        if ($wait <= 0) {
+            return;
+        }
+        try {
+            $this->buffer->backOffUntil($now + min($wait, self::MAX_RETRY_AFTER));
+        } catch (\Throwable $e) {
+            Log::error('Retry-After could not be stored: '.$e->getMessage());
+        }
     }
 
     private function problemTitle(string $body): string
@@ -229,59 +263,75 @@ final class SonarClient
      *
      * @return array<string, mixed>
      */
-    private function body(array $fields, \DateTimeImmutable $ranAt): array
+    private function body(string $check, array $fields, \DateTimeImmutable $ranAt): array
     {
-        $status = $fields['status'] ?? 'ok';
-        if (!in_array($status, ['ok', 'warn', 'fail'], true)) {
-            Log::error(sprintf('Ignored the unknown status "%s", sent ok.', is_scalar($status) ? (string) $status : gettype($status)));
-            $status = 'ok';
-        }
         $body = [
             'id' => self::uuid(),
             'ranAt' => $ranAt->format('Y-m-d\TH:i:s.uP'),
-            'status' => $status,
+            'status' => $fields['status'] ?? Status::OK,
         ];
-        // Optional fields that sonar would refuse (422) are cleaned up instead, so they never cost the whole Pulse.
-        if (isset($fields['count']) && (int) $fields['count'] >= 0) {
-            $body['count'] = (int) $fields['count'];
+        $count = $fields['count'] ?? null;
+        if (null !== $count) {
+            is_int($count) && $count >= 0 ? $body['count'] = $count : $this->leftOut($check, 'count', 'it has to be an integer of 0 or more');
         }
-        if (isset($fields['duration'])) {
-            $body['duration'] = round(max(0.0, min((float) $fields['duration'], self::MAX_DURATION)), 3);
+        $duration = $fields['duration'] ?? null;
+        if (null !== $duration) {
+            (is_int($duration) || is_float($duration)) && is_finite((float) $duration) && $duration >= 0 && $duration <= self::MAX_DURATION
+                ? $body['duration'] = round((float) $duration, 3)
+                : $this->leftOut($check, 'duration', sprintf('it has to be a number of seconds from 0 to %d', self::MAX_DURATION));
         }
-        $values = isset($fields['values']) && is_array($fields['values']) ? self::values($fields['values']) : [];
-        if ([] !== $values) {
-            $body['values'] = (object) $values;
+        $values = $fields['values'] ?? null;
+        if (null !== $values) {
+            if (self::validValues($values)) {
+                [] !== $values && $body['values'] = (object) $values;
+            } else {
+                $this->leftOut($check, 'values', sprintf('it has to hold at most %d numbers, flags or strings of at most %d characters', self::MAX_VALUES, self::MAX_STRING));
+            }
         }
-        if (isset($fields['log'])) {
-            $body['log'] = self::tail((string) $fields['log']);
+        $log = $fields['log'] ?? null;
+        if (null !== $log) {
+            is_scalar($log) ? $body['log'] = self::tail((string) $log) : $this->leftOut($check, 'log', 'it has to be a string');
         }
 
         return $body;
     }
 
-    /**
-     * At most 50 scalar values; longer strings are cut to 500 characters.
-     *
-     * @param array<mixed> $values
-     *
-     * @return array<string, bool|int|float|string>
-     */
-    private static function values(array $values): array
+    private function leftOut(string $check, string $field, string $why): void
     {
-        $clean = [];
-        foreach ($values as $name => $value) {
-            if (count($clean) >= self::MAX_VALUES) {
-                break;
-            }
-            if (is_string($value)) {
-                $value = self::cut($value, 500);
-            }
-            if (is_bool($value) || is_int($value) || is_float($value) || is_string($value)) {
-                $clean[(string) $name] = $value;
+        Log::error(sprintf('Pulse "%s": left out the invalid "%s", %s.', $check, $field, $why));
+    }
+
+    /**
+     * @param mixed $values
+     */
+    private static function validValues($values): bool
+    {
+        if (!is_array($values) || count($values) > self::MAX_VALUES) {
+            return false;
+        }
+        foreach ($values as $value) {
+            if (is_string($value) ? self::cut($value, self::MAX_STRING) !== $value : !(is_bool($value) || is_int($value) || is_float($value))) {
+                return false;
             }
         }
 
-        return $clean;
+        return true;
+    }
+
+    /**
+     * The body, with a log cut further when its escaped form would push the body past what sonar takes.
+     *
+     * @param array<string, mixed> $body
+     *
+     * @return array<string, mixed>
+     */
+    private function fit(array $body): array
+    {
+        while (strlen(Json::encode($body)) > self::MAX_BODY_BYTES && isset($body['log']) && '' !== $body['log']) {
+            $body['log'] = self::tail(substr($body['log'], -(int) (strlen($body['log']) * 0.75)));
+        }
+
+        return $body;
     }
 
     /**

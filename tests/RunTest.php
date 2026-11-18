@@ -140,19 +140,41 @@ final class RunTest extends TestCase
         self::assertCount(1, glob($this->dir.'/buffer/*.json') ?: [], 'the Pulse waits in the buffer');
     }
 
-    public function testTheBufferIsFlushedBeforeTheRunsPulseIsSent(): void
+    public function testTheBufferIsResentBeforeTheJobStartsAndTheRunsPulseCountsFromItsStart(): void
     {
         $this->transport->failWith();
         $first = $this->client->pulse('other');
         $this->clock->advance(10);
+        $seenInJob = null;
 
-        $this->client->run('import', function (Run $run) {
+        $this->client->run('import', function (Run $run) use (&$seenInJob) {
+            $seenInJob = array_map(function ($request) {
+                return $request->getJson()['id'];
+            }, array_slice($this->transport->getRequests(), 1));
+            $this->clock->advance(5);
         });
+
+        self::assertSame([$first->getId()], $seenInJob, 'resent before the job body ran');
+        $requests = $this->transport->getRequests();
+        self::assertCount(3, $requests);
+        self::assertSame('2026-11-18T10:00:10.000000+00:00', end($requests)->getJson()['ranAt']);
+    }
+
+    public function testAJobThatFailsHasStillTriggeredTheResend(): void
+    {
+        $this->transport->failWith();
+        $first = $this->client->pulse('other');
+
+        try {
+            $this->client->run('import', function (Run $run) {
+                throw new \RuntimeException('boom');
+            });
+        } catch (\RuntimeException $e) {
+        }
 
         $ids = array_map(function ($request) {
             return $request->getJson()['id'];
-        }, array_slice($this->transport->getRequests(), 1));
-        self::assertSame($first->getId(), $ids[0]);
-        self::assertCount(2, $ids);
+        }, $this->transport->getRequests());
+        self::assertSame($first->getId(), $ids[1]);
     }
 }

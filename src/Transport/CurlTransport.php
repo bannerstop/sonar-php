@@ -34,6 +34,7 @@ final class CurlTransport implements Transport
         foreach ($headers as $name => $value) {
             $lines[] = $name.': '.$value;
         }
+        $responseHeaders = [];
         $handle = curl_init($url);
         if (false === $handle) {
             throw new TransportException('curl could not be initialised.');
@@ -47,6 +48,14 @@ final class CurlTransport implements Transport
             CURLOPT_CONNECTTIMEOUT_MS => (int) ceil($this->connectTimeout * 1000),
             CURLOPT_TIMEOUT_MS => (int) ceil($this->timeout * 1000),
             CURLOPT_NOSIGNAL => true,
+            CURLOPT_HEADERFUNCTION => static function ($handle, string $line) use (&$responseHeaders): int {
+                $parts = explode(':', $line, 2);
+                if (2 === count($parts)) {
+                    $responseHeaders[trim($parts[0])] = trim($parts[1]);
+                }
+
+                return strlen($line);
+            },
         ]);
         $answer = curl_exec($handle);
         $status = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
@@ -59,6 +68,6 @@ final class CurlTransport implements Transport
             throw new TransportException('' !== $error ? $error : 'No answer.');
         }
 
-        return new TransportResponse($status, $answer);
+        return new TransportResponse($status, $answer, $responseHeaders);
     }
 }

@@ -62,7 +62,7 @@ final class BufferTest extends TestCase
     }
 
     /**
-     * Buffers $count Pulses of the check "job", one minute apart, while the Main is down.
+     * Buffers $count Pulses of the check "job", one minute apart, while sonar is down.
      *
      * @return list<string> their ids
      */

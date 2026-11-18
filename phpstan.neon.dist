@@ -5,4 +5,4 @@ parameters:
         - src
         - bin
     bootstrapFiles:
-        - .vendor/85/autoload.php
+        - vendor/autoload.php

@@ -45,7 +45,12 @@ final class StreamTransport implements Transport
             $responseHeaders = get_defined_vars()['http_response_header'] ?? []; // @phpstan-ignore nullCoalesce.offset
         }
         $status = 0;
+        $headers = [];
         foreach ($responseHeaders as $line) {
+            $parts = explode(':', $line, 2);
+            if (2 === count($parts)) {
+                $headers[trim($parts[0])] = trim($parts[1]);
+            }
             if (1 === preg_match('~^HTTP/\S+\s+(\d{3})~', $line, $match)) {
                 $status = (int) $match[1]; // the last status line wins (after a 100 Continue)
             }
@@ -56,6 +61,6 @@ final class StreamTransport implements Transport
             throw new TransportException(null !== $error ? $error['message'] : 'No answer.');
         }
 
-        return new TransportResponse($status, $answer);
+        return new TransportResponse($status, $answer, $headers);
     }
 }

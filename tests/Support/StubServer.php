@@ -21,10 +21,16 @@ final class StubServer
     public function __construct()
     {
         $this->state = TempDir::create();
+        $this->port = self::freePort();
+    }
+
+    private static function freePort(): int
+    {
         $socket = stream_socket_server('tcp://127.0.0.1:0');
         $name = (string) stream_socket_get_name($socket, false);
         fclose($socket);
-        $this->port = (int) substr($name, (int) strrpos($name, ':') + 1);
+
+        return (int) substr($name, (int) strrpos($name, ':') + 1);
     }
 
     public function getUrl(): string
@@ -33,35 +39,48 @@ final class StubServer
     }
 
     /**
-     * @param string $mode a status code, or "sleep:<milliseconds>:<status>"
+     * @param string $mode a status code, "sleep:<milliseconds>:<status>" or "retry:<status>:<seconds>" (with Retry-After)
      */
     public function answer(string $mode): void
     {
         file_put_contents($this->state.'/mode', $mode);
     }
 
+    /**
+     * Starts the server; when the child dies at once (the port was taken in the meantime) it tries a new port.
+     */
     public function start(): void
     {
-        $pipes = [];
-        $process = proc_open(
-            implode(' ', array_map('escapeshellarg', [PHP_BINARY, '-S', '127.0.0.1:'.$this->port, __DIR__.'/stub/router.php'])),
-            [0 => ['file', '/dev/null', 'r'], 1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']],
-            $pipes,
-            __DIR__.'/stub',
-            ['STUB_STATE' => $this->state, 'PHP_CLI_SERVER_WORKERS' => '4']
-        );
-        if (!is_resource($process)) {
-            throw new \RuntimeException('The stub server did not start.');
-        }
-        $this->process = $process;
-        for ($i = 0; $i < 100; ++$i) {
-            $socket = @fsockopen('127.0.0.1', $this->port, $code, $message, 0.1);
-            if (false !== $socket) {
-                fclose($socket);
-
-                return;
+        for ($attempt = 0; $attempt < 3; ++$attempt) {
+            if ($attempt > 0) {
+                $this->port = self::freePort();
             }
-            usleep(50000);
+            $pipes = [];
+            // exec: the shell is replaced by php, so terminating the process ends the server
+            $process = proc_open(
+                'exec '.implode(' ', array_map('escapeshellarg', [PHP_BINARY, '-S', '127.0.0.1:'.$this->port, __DIR__.'/stub/router.php'])),
+                [0 => ['file', '/dev/null', 'r'], 1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']],
+                $pipes,
+                __DIR__.'/stub',
+                array_merge(getenv(), ['STUB_STATE' => $this->state, 'PHP_CLI_SERVER_WORKERS' => '4'])
+            );
+            if (!is_resource($process)) {
+                continue;
+            }
+            $this->process = $process;
+            for ($i = 0; $i < 100; ++$i) {
+                if (!proc_get_status($process)['running']) {
+                    break;
+                }
+                $socket = @fsockopen('127.0.0.1', $this->port, $code, $message, 0.1);
+                if (false !== $socket) {
+                    fclose($socket);
+
+                    return;
+                }
+                usleep(50000);
+            }
+            $this->stop();
         }
         throw new \RuntimeException('The stub server did not come up.');
     }

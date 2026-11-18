@@ -82,6 +82,19 @@ final class RealTransportTest extends TestCase
         }
     }
 
+    public function testTheHeadersOfTheAnswerAreAvailable(): void
+    {
+        $this->server->start();
+        $this->server->answer('retry:429:120');
+
+        foreach ($this->transports() as $name => $transport) {
+            $response = $transport->send($this->server->getUrl().'/x', [], '{}');
+
+            self::assertSame(429, $response->getStatusCode(), $name);
+            self::assertSame('120', $response->getHeader('retry-after'), $name);
+        }
+    }
+
     public function testAConnectionRefusedIsATransportException(): void
     {
         foreach ($this->transports() as $name => $transport) {

@@ -69,7 +69,7 @@ final class FlushResult
     }
 
     /**
-     * True when another process was flushing the same buffer, so nothing was done.
+     * True when nothing was done: another process was flushing the same buffer, or sonar asked to wait (Retry-After).
      */
     public function wasSkipped(): bool
     {

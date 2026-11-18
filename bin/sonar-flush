@@ -28,6 +28,6 @@ printf(
     $report->getSent(),
     $report->getDropped(),
     $report->getRemaining(),
-    $report->wasSkipped() ? ' (another flush is running, skipped)' : ($report->hasFailed() ? ' (sonar could not be reached or was busy)' : '')
+    $report->wasSkipped() ? ' (skipped: another flush is running, or sonar asked to wait)' : ($report->hasFailed() ? ' (sonar could not be reached or was busy)' : '')
 );
 exit(0);

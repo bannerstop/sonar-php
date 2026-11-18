@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Bannerstop\Sonar\Tests;
 
 use Bannerstop\Sonar\SonarClient;
+use Bannerstop\Sonar\Tests\Support\Process;
 use Bannerstop\Sonar\Tests\Support\StubServer;
 use Bannerstop\Sonar\Tests\Support\TempDir;
 use PHPUnit\Framework\TestCase;
@@ -46,9 +47,9 @@ final class OutageTest extends TestCase
         $client = $this->client();
         $sent = [];
 
-        // the Main is down: connection refused
+        // sonar is down: connection refused
         $sent[] = $client->pulse('job', ['count' => 1]);
-        // the Main is back but failing
+        // sonar is back but failing
         $this->server->start();
         $this->server->answer('503');
         $sent[] = $client->pulse('job', ['count' => 2]);
@@ -58,7 +59,7 @@ final class OutageTest extends TestCase
         }
         $this->server->forgetRequests();
 
-        // the Main is healthy again
+        // sonar is healthy again
         $this->server->answer('202');
         $new = $client->pulse('job', ['count' => 4]);
 
@@ -86,22 +87,18 @@ final class OutageTest extends TestCase
             self::assertTrue($client->pulse('job', ['count' => $i])->isBuffered());
         }
         $this->server->forgetRequests();
-        $this->server->answer('sleep:250:202'); // a flush takes over a second, the other process starts meanwhile
+        $this->server->answer('sleep:400:202'); // holding the lock for two seconds
 
-        $autoload = dirname((string) (new \ReflectionClass(\Composer\Autoload\ClassLoader::class))->getFileName(), 2).'/autoload.php';
-        $command = implode(' ', array_map('escapeshellarg', [PHP_BINARY, __DIR__.'/Support/flush-worker.php', $autoload, $this->server->getUrl(), $this->dir.'/buffer']));
-        $processes = [];
-        foreach ([0, 1] as $worker) {
-            $pipes = [];
-            $processes[$worker] = [proc_open($command, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes), $pipes];
+        $command = [PHP_BINARY, __DIR__.'/Support/flush-worker.php', $this->server->getUrl(), $this->dir.'/buffer'];
+        $first = new Process($command);
+        // the second flush starts once the first has sent something, i.e. while it holds the lock
+        $deadline = microtime(true) + 20;
+        while ([] === $this->server->getRequests()) {
+            self::assertLessThan($deadline, microtime(true), 'the first flush did not start sending');
+            usleep(20000);
         }
-        $reports = [];
-        foreach ($processes as $worker => list($process, $pipes)) {
-            $output = (string) stream_get_contents($pipes[1]);
-            stream_get_contents($pipes[2]);
-            proc_close($process);
-            $reports[$worker] = json_decode($output, true);
-        }
+        $second = new Process($command);
+        $reports = [json_decode($first->wait()[1], true), json_decode($second->wait()[1], true)];
 
         $ids = array_map(function ($request) {
             return json_decode($request['body'], true)['id'];
@@ -109,7 +106,8 @@ final class OutageTest extends TestCase
         self::assertCount(5, $ids);
         self::assertSame($ids, array_values(array_unique($ids)), 'no entry was sent twice');
         self::assertSame(5, $reports[0]['sent'] + $reports[1]['sent']);
-        self::assertTrue($reports[0]['skipped'] || $reports[1]['skipped'], 'the second flush saw the lock and skipped');
+        self::assertSame(5, $reports[0]['sent']);
+        self::assertTrue($reports[1]['skipped'], 'the second flush saw the lock and skipped');
         self::assertSame([], glob($this->dir.'/buffer/*.json'));
     }
 }

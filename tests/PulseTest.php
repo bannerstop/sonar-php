@@ -111,9 +111,9 @@ final class PulseTest extends TestCase
 
     public function testACheckNameIsUrlEncodedInThePath(): void
     {
-        $this->client()->pulse('nightly import/é');
+        $this->client()->pulse('nightly import é');
 
-        self::assertSame('https://sonar.example.com/intake/v1/pulse/nightly%20import%2F%C3%A9', $this->transport->getRequests()[0]->getUrl());
+        self::assertSame('https://sonar.example.com/intake/v1/pulse/nightly%20import%20%C3%A9', $this->transport->getRequests()[0]->getUrl());
     }
 
     public function testALogLongerThanTheContractIsCutToItsEnd(): void
@@ -144,22 +144,91 @@ final class PulseTest extends TestCase
         self::assertNotSame('', $request->getJson()['log']);
     }
 
-    public function testOptionalFieldsSonarWouldRefuseAreCleanedUpInsteadOfLosingThePulse(): void
+    public function testInvalidOptionalFieldsAreLeftOutWithOneLogLineEachAndThePulseIsStillSent(): void
     {
-        $values = ['ok' => 1, 'nested' => ['a'], 'long' => str_repeat('x', 600)];
-        for ($i = 0; $i < 60; ++$i) {
+        $values = [];
+        for ($i = 0; $i < 51; ++$i) {
             $values['v'.$i] = $i;
         }
 
-        $this->client()->pulse('job', ['status' => 'bogus', 'count' => -3, 'duration' => -1.5, 'values' => $values]);
+        $result = $this->client()->pulse('job', ['count' => -3, 'duration' => -1.5, 'values' => $values, 'log' => 'kept']);
 
-        $body = $this->transport->getRequests()[0]->getJson();
-        self::assertSame('ok', $body['status']);
-        self::assertArrayNotHasKey('count', $body);
-        self::assertSame(0, $body['duration']);
-        self::assertCount(50, $body['values']);
-        self::assertArrayNotHasKey('nested', $body['values']);
-        self::assertSame(500, strlen($body['values']['long']));
+        self::assertTrue($result->isSent());
+        self::assertSame(['id', 'ranAt', 'status', 'log'], array_keys($this->transport->getRequests()[0]->getJson()));
+        $log = $this->capturedErrorLog();
+        foreach (['count', 'duration', 'values'] as $field) {
+            self::assertSame(1, substr_count($log, 'left out the invalid "'.$field.'"'), $field);
+        }
+    }
+
+    public function testValuesThatAreNotScalarOrTooLongAreLeftOutAsAWhole(): void
+    {
+        $this->client()->pulse('job', ['values' => ['nested' => ['a']]]);
+        $this->client()->pulse('job', ['values' => ['long' => str_repeat('x', 501)]]);
+
+        foreach ($this->transport->getRequests() as $request) {
+            self::assertArrayNotHasKey('values', $request->getJson());
+        }
+    }
+
+    public function testAnUnknownStatusIsRejectedLocallyAndNothingIsSent(): void
+    {
+        $result = $this->client()->pulse('job', ['status' => 'bogus']);
+
+        self::assertTrue($result->isRejected());
+        self::assertStringContainsString('ok, warn, fail', (string) $result->getMessage());
+        self::assertSame([], $this->transport->getRequests());
+        self::assertSame([], $this->bufferFiles());
+    }
+
+    public function testACheckNameThatCannotBeOneSegmentIsRejectedLocally(): void
+    {
+        foreach (['', 'a/b'] as $name) {
+            self::assertTrue($this->client()->pulse($name)->isRejected(), $name);
+        }
+        self::assertSame([], $this->transport->getRequests());
+    }
+
+    public function testTemporaryAnswersAlsoIncludeTimeoutTooEarlyAndRedirects(): void
+    {
+        foreach ([408, 425, 301, 302, 307] as $status) {
+            $transport = new InMemoryTransport();
+            $transport->respondWith($status);
+
+            $result = $this->client(['transport' => $transport, 'bufferDir' => $this->dir.'/buffer-'.$status])->pulse('job');
+
+            self::assertTrue($result->isBuffered(), (string) $status);
+        }
+    }
+
+    public function testRetryAfterOfA429HoldsBackSendingAndFlushingUntilItIsOver(): void
+    {
+        $client = $this->client();
+        $this->transport->respondWith(429, '', ['Retry-After' => '120']);
+        self::assertTrue($client->pulse('job')->isBuffered());
+        self::assertCount(1, $this->transport->getRequests());
+
+        $this->clock->advance(60);
+        $held = $client->pulse('job');
+
+        self::assertTrue($held->isBuffered());
+        self::assertCount(1, $this->transport->getRequests(), 'nothing was sent while sonar asked to wait');
+        self::assertCount(2, $this->bufferFiles());
+
+        $this->clock->advance(61);
+        self::assertTrue($client->pulse('job')->isSent());
+        self::assertCount(4, $this->transport->getRequests(), 'both buffered Pulses and the new one');
+    }
+
+    public function testRetryAfterOfA503IsHonouredToo(): void
+    {
+        $this->transport->respondWith(503, '', ['Retry-After' => '30']);
+        $client = $this->client();
+        $client->pulse('job');
+
+        $client->pulse('job');
+
+        self::assertCount(1, $this->transport->getRequests());
     }
 
     public function testAcceptedWithPendingRegistrationCountsAsSent(): void
@@ -195,9 +264,11 @@ final class PulseTest extends TestCase
 
     public function testOtherClientErrorsAreRejectedToo(): void
     {
-        $this->transport->respondWith(413);
+        foreach ([400, 409, 413] as $status) {
+            $this->transport->respondWith($status);
 
-        self::assertTrue($this->client()->pulse('job')->isRejected());
+            self::assertTrue($this->client()->pulse('job')->isRejected(), (string) $status);
+        }
         self::assertSame([], $this->bufferFiles());
     }
 

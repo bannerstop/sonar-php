@@ -14,6 +14,7 @@ final class Buffer
 {
     public const MAX_AGE = 604800; // 7 days, the oldest ranAt sonar takes
     private const LOCK = '.lock';
+    private const RETRY_AFTER = '.retry-after';
     private const STALE_TEMP = 3600;
 
     /** @var string */
@@ -45,10 +46,7 @@ final class Buffer
         if (!is_dir($this->dir) && !@mkdir($this->dir, 0700, true) && !is_dir($this->dir)) {
             throw new \RuntimeException(sprintf('The buffer directory %s cannot be created.', $this->dir));
         }
-        $json = json_encode(['check' => $check, 'body' => $body], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
-        if (false === $json) {
-            throw new \RuntimeException('The Pulse cannot be encoded as JSON: '.json_last_error_msg());
-        }
+        $json = Json::encode(['check' => $check, 'body' => $body]);
         $name = $ranAt->setTimezone(new \DateTimeZone('UTC'))->format('Ymd\THisu').'-'.$body['id'].'.json';
         $temp = $this->dir.'/.'.bin2hex(random_bytes(6)).'.tmp';
         if (false === @file_put_contents($temp, $json) || !@rename($temp, $this->dir.'/'.$name)) {
@@ -57,6 +55,39 @@ final class Buffer
             throw new \RuntimeException(sprintf('The buffer directory %s is not writable.', $this->dir));
         }
         $this->enforceLimit();
+    }
+
+    /**
+     * Sonar asked to wait (Retry-After): nothing is sent from this buffer before `$epoch` (seconds since the epoch).
+     *
+     * @throws \RuntimeException
+     */
+    public function backOffUntil(float $epoch): void
+    {
+        if (!is_dir($this->dir) && !@mkdir($this->dir, 0700, true) && !is_dir($this->dir)) {
+            throw new \RuntimeException(sprintf('The buffer directory %s cannot be created.', $this->dir));
+        }
+        if (false === @file_put_contents($this->dir.'/'.self::RETRY_AFTER, sprintf('%.3F', $epoch))) {
+            throw new \RuntimeException(sprintf('The buffer directory %s is not writable.', $this->dir));
+        }
+    }
+
+    /**
+     * Seconds since the epoch before which nothing is sent, 0 when there is no wait.
+     */
+    public function backedOffUntil(): float
+    {
+        $content = @file_get_contents($this->dir.'/'.self::RETRY_AFTER);
+
+        return false === $content ? 0.0 : (float) $content;
+    }
+
+    /**
+     * The current time in seconds since the epoch, by the buffer's clock.
+     */
+    public function now(): float
+    {
+        return $this->epoch();
     }
 
     /**
@@ -75,7 +106,7 @@ final class Buffer
             throw new \RuntimeException(sprintf('The buffer directory %s is not writable.', $this->dir));
         }
         try {
-            if (!flock($lock, LOCK_EX | LOCK_NB)) {
+            if ($this->backedOffUntil() > $this->epoch() || !flock($lock, LOCK_EX | LOCK_NB)) {
                 return new FlushResult(0, 0, count($this->files()), false, true);
             }
 
@@ -91,11 +122,11 @@ final class Buffer
      */
     private function flushLocked(callable $deliver, int $maxPulses, ?float $maxSeconds): FlushResult
     {
-        $started = $this->seconds();
+        $started = $this->epoch();
         $sent = $dropped = $attempts = 0;
         $failed = false;
         $this->removeStaleTempFiles();
-        $oldest = $this->seconds() - self::MAX_AGE;
+        $oldest = $this->epoch() - self::MAX_AGE;
 
         foreach ($this->files() as $file) {
             $entry = $this->read($file);
@@ -110,7 +141,7 @@ final class Buffer
                 ++$dropped;
                 continue;
             }
-            if ($attempts >= $maxPulses || (null !== $maxSeconds && $this->seconds() - $started >= $maxSeconds)) {
+            if ($attempts >= $maxPulses || (null !== $maxSeconds && $this->epoch() - $started >= $maxSeconds)) {
                 break;
             }
             ++$attempts;
@@ -137,10 +168,10 @@ final class Buffer
             return null;
         }
         $ranAt = is_string($entry->body->ranAt ?? null) ? date_create_immutable($entry->body->ranAt) : false;
-        $json = json_encode($entry->body, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
-        if (false === $ranAt || false === $json) {
+        if (false === $ranAt) {
             return null;
         }
+        $json = Json::encode($entry->body);
 
         return ['check' => $entry->check, 'json' => $json, 'ranAt' => (float) $ranAt->format('U.u')];
     }
@@ -173,7 +204,7 @@ final class Buffer
         }
     }
 
-    private function seconds(): float
+    private function epoch(): float
     {
         return (float) call_user_func($this->clock)->format('U.u');
     }

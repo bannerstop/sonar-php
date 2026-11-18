@@ -10,7 +10,7 @@ namespace Bannerstop\Sonar;
 final class Run
 {
     /** @var string */
-    private $status = 'ok';
+    private $status = Status::OK;
 
     /** @var int|null */
     private $count;
