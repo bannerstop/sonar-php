@@ -4,8 +4,7 @@ declare(strict_types=1);
 
 namespace Bannerstop\Sonar;
 
-use Bannerstop\Sonar\Transport\CurlTransport;
-use Bannerstop\Sonar\Transport\StreamTransport;
+use Bannerstop\Sonar\Transport\DefaultTransport;
 use Bannerstop\Sonar\Transport\Transport;
 use Bannerstop\Sonar\Transport\TransportResponse;
 
@@ -73,7 +72,7 @@ final class SonarClient
         $this->clock = $options['clock'] ?? static function (): \DateTimeImmutable {
             return new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
         };
-        $this->transport = $options['transport'] ?? self::defaultTransport((float) ($options['connectTimeout'] ?? 2.0), (float) ($options['timeout'] ?? 5.0));
+        $this->transport = $options['transport'] ?? DefaultTransport::create((float) ($options['connectTimeout'] ?? 2.0), (float) ($options['timeout'] ?? 5.0));
         $this->flushLimit = (int) ($options['flushLimit'] ?? 50);
         $this->flushSeconds = (float) ($options['flushSeconds'] ?? 3.0);
         $this->buffer = new Buffer(
@@ -377,10 +376,5 @@ final class SonarClient
     private function now(): \DateTimeImmutable
     {
         return call_user_func($this->clock);
-    }
-
-    private static function defaultTransport(float $connectTimeout, float $timeout): Transport
-    {
-        return extension_loaded('curl') ? new CurlTransport($connectTimeout, $timeout) : new StreamTransport($timeout);
     }
 }
