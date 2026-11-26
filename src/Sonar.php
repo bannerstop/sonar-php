@@ -66,6 +66,33 @@ final class Sonar
         return $client->run($check, $job);
     }
 
+    /**
+     * Tells sonar which PHP this application runs with, when it is due (see RuntimeReporter). Call it on every
+     * request or command, as early as the bootstrap allows. Reads SONAR_URL, SONAR_TOKEN and the Service's slug
+     * from the argument or SONAR_SERVICE. Never throws; with none of them set it does nothing, with some missing it logs once per process.
+     *
+     * @param array<string, mixed> $options see RuntimeReporter
+     */
+    public static function reportRuntime(?string $service = null, array $options = []): void
+    {
+        try {
+            $service = $service ?? getenv('SONAR_SERVICE');
+            if ((false === $service || '' === $service) && false === getenv('SONAR_URL') && false === getenv('SONAR_TOKEN')) {
+                return; // not set up: an environment without sonar (a developer's machine) stays quiet
+            }
+            $problem = 'SONAR_URL, SONAR_TOKEN and SONAR_SERVICE are needed to report the runtime.';
+            if (false === $service || '' === trim($service)) {
+                throw new \InvalidArgumentException($problem);
+            }
+            (new RuntimeReporter(self::env('SONAR_URL', $problem), self::env('SONAR_TOKEN', $problem), $service, $options))->reportIfDue();
+        } catch (\Throwable $e) {
+            if (!self::$loggedNotConfigured) {
+                self::$loggedNotConfigured = true;
+                Log::error($e->getMessage());
+            }
+        }
+    }
+
     public static function flush(int $maxPulses = PHP_INT_MAX, ?float $maxSeconds = null): ?FlushResult
     {
         $client = self::tryClient();

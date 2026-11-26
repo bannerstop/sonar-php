@@ -136,4 +136,53 @@ final class SonarTest extends TestCase
 
         self::assertSame(2, $transport->getRequests()[0]->getJson()['count']);
     }
+
+    public function testReportRuntimeUsesTheEnvironmentAndTheServiceSlug(): void
+    {
+        $transport = new InMemoryTransport();
+        $deferred = [];
+        putenv('SONAR_URL=https://sonar.example.com');
+        putenv('SONAR_TOKEN=env-token');
+        putenv('SONAR_SERVICE=checkout');
+        try {
+            Sonar::reportRuntime(null, [
+                'transport' => $transport,
+                'markerDir' => $this->dir.'/marker',
+                'afterResponse' => function (callable $task) use (&$deferred): void {
+                    $deferred[] = $task;
+                },
+            ]);
+        } finally {
+            putenv('SONAR_SERVICE');
+        }
+        foreach ($deferred as $task) {
+            $task();
+        }
+
+        $request = $transport->getRequests()[0];
+        self::assertSame('https://sonar.example.com/intake/v1/runtime', $request->getUrl());
+        self::assertSame('checkout', $request->getJson()['service']);
+    }
+
+    public function testReportRuntimeWithoutAnyConfigurationStaysQuiet(): void
+    {
+        $this->captureErrorLog($this->dir.'/php-error.log');
+        putenv('SONAR_SERVICE');
+
+        Sonar::reportRuntime();
+
+        self::assertSame('', $this->capturedErrorLog());
+    }
+
+    public function testReportRuntimeWithHalfAConfigurationLogsOncePerProcessAndNeverThrows(): void
+    {
+        $this->captureErrorLog($this->dir.'/php-error.log');
+        putenv('SONAR_URL=https://sonar.example.com');
+        putenv('SONAR_TOKEN=env-token');
+
+        Sonar::reportRuntime();
+        Sonar::reportRuntime();
+
+        self::assertSame(1, substr_count($this->capturedErrorLog(), 'SONAR_SERVICE'));
+    }
 }

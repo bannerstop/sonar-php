@@ -6,6 +6,8 @@ ran. It is made for crons and other jobs that must never be slowed down or broke
 - **Never throws** into your job and waits seconds at most (2 s to connect, 5 s in total by default).
 - **Survives outages**: if sonar does not answer, the Pulse is kept in a small on-disk buffer and resent later with
   its original time and id, so sonar judges the run when it happened and counts it once.
+- **Reports its own PHP runtime**: one line in the bootstrap tells sonar which PHP version an application really runs
+  with, for web requests and the command line separately (see [The application's runtime](#the-applications-runtime)).
 - **No dependencies**: PHP 7.2 or newer and `ext-json`. No Guzzle, no PSR packages, no Symfony. Use ext-curl, a
   stream fallback, or your framework's PSR-18 client.
 
@@ -15,7 +17,7 @@ ran. It is made for crons and other jobs that must never be slowed down or broke
 composer require bannerstop/sonar-php
 ```
 
-PHP `^7.2 || ^8.0`. One release line; projects on PHP below 7.2 cannot use this package.
+PHP `^7.2 || ^8.0` (the runtime report included: it uses nothing newer). One release line; projects on PHP below 7.2 cannot use this package.
 
 ## Quick start
 
@@ -94,6 +96,63 @@ fails as before. Inside the callback you can set `setCount()`, `setValues()`, `s
 even a job that dies has flushed it, and the measured duration starts only after that. A Pulse counts at `ranAt`, and
 sonar refuses one more than 5 minutes in the future: keep the clock of the host right (such a Pulse is rejected with a
 422).
+
+## The application's runtime
+
+Only the application knows which PHP executes it: on shared hosting the version of web requests is set in the hoster's
+panel and cannot be seen from outside. One call tells sonar the full PHP version (`PHP_VERSION`, patch level
+included), whether it came from a web request or the command line, and the version of this package:
+
+```bash
+SONAR_URL=https://sonar.example.com
+SONAR_TOKEN=...            # the token of the Project (sonar_pls_...), the one that reports Deployments
+SONAR_SERVICE=checkout     # the slug of the Service this application is, in that Project
+```
+
+```php
+\Bannerstop\Sonar\Sonar::reportRuntime();                  // reads the three variables
+\Bannerstop\Sonar\Sonar::reportRuntime('checkout');         // or name the Service here
+```
+
+Call it on **every request and every command**, as early as the bootstrap allows, and with no wrapper around it:
+
+- **Plain PHP**: at the top of `public/index.php` (and of the command line entry point), after the autoloader.
+- **Symfony**: in `public/index.php` and `bin/console`, after the autoloader. Symfony's `.env` files are not always
+  visible to `getenv()`, so you can also pass the values: `new RuntimeReporter($_SERVER['SONAR_URL'], ...)`.
+- **Laravel**: in `AppServiceProvider::boot()`. Newer Laravel versions do not fill `getenv()` from `.env`, so
+  pass the values from `config()`/`env()` to `new RuntimeReporter($url, $token, $service)` and call `->reportIfDue()`.
+
+There is no framework package: `RuntimeReporter` is framework-neutral and the call is the same everywhere, so the
+integration is these lines. Not tested against a framework in this repository.
+
+How it behaves:
+
+- **Once per release and day.** A small marker file per SAPI remembers what was reported. The first run of a new
+  release (a changed PHP version, package version or install directory, or the `release` option) reports at once, then
+  at most once per day per SAPI. Every other request only reads the marker and does nothing. sonar treats a value that
+  was not renewed for 3 days as not measured.
+- **After the response.** In a web request the report is sent from a shutdown function after the response was closed
+  (`fastcgi_finish_request()` on php-fpm, `litespeed_finish_request()` on LiteSpeed, a flush otherwise), with 1 s to
+  connect and 2 s in total. On the command line it is sent at shutdown with the same timeouts.
+- **Never hurts the application.** Nothing throws. A failure (sonar down, 401/403 wrong token, 422 unknown Service, 429)
+  is retried after 15 minutes at the earliest and written to `error_log()` once a day, without the token.
+- **Web and command line are separate.** sonar keeps `php` (web) and `php_cli` (command line) as two measurements of the
+  Service, so the two versions an app can have never mix.
+- **The marker** lives in `sys_get_temp_dir()/sonar-php/runtime-<hash>/` (mode `0700`); set `markerDir` to change it.
+  If it cannot be written, nothing is reported (and nothing is logged): an unwritable marker would otherwise report
+  on every request. Run web and command line as users that can both write it, or give both the same `markerDir`.
+  Without ext-curl the stream transport is used; pass `transport` for a PSR-18 client.
+- Without any of `SONAR_URL`, `SONAR_TOKEN` and `SONAR_SERVICE` it does nothing, silently (a developer machine);
+  with some of them missing it logs once per process.
+
+`Sonar::reportRuntime($service, $options)` takes the options of `RuntimeReporter`: `connectTimeout`, `timeout`,
+`transport`, `markerDir` and `release` (any string that changes with a deploy, e.g. a Git SHA; useful when the
+install directory stays the same). To wire it through a container:
+
+```php
+$reporter = new \Bannerstop\Sonar\RuntimeReporter($url, $token, 'checkout', ['release' => $gitSha]);
+$reporter->reportIfDue();
+```
 
 ## Configuration
 
@@ -197,6 +256,9 @@ throwing `TransportException` only when no answer came back. Every HTTP status i
 `POST {SONAR_URL}/intake/v1/pulse/{check}` with `Authorization: Bearer <token>` and a JSON body: `id` (a UUID the
 client generates), `ranAt` (ISO 8601 with offset, set when the job ran), `status`, and optionally `count`,
 `duration`, `values` and `log`. The check name is URL-encoded.
+
+The runtime report is `POST {SONAR_URL}/intake/v1/runtime` with the same `Authorization: Bearer` header and the body
+`{"service": "checkout", "sapi": "web", "php": "8.3.12", "package": "1.1.0"}`; sonar answers 2xx when it stored it.
 
 ## Development
 
