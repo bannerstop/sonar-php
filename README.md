@@ -222,7 +222,11 @@ What is sent, and what never is:
   upwards are reported (`errorLevel` changes that); `@` is respected. Handled errors go on to the previous handler or PHP's own.
 
 Options of `registerErrorHandler($options)` and `ErrorReporter`: `connectTimeout`, `timeout`, `transport`, `bufferDir`,
-`bufferLimit`, `codeVersion`, `scrub`, `maxItems`, `errorLevel`, `serverName`.
+`bufferLimit`, `codeVersion`, `scrub`, `maxItems`, `errorLevel`, `serverName`; for tests `sapi`, `server`, `afterResponse` and `clock`.
+
+Not done: sonar's contract has no route field and the client cannot know a framework's route template, so the URL path
+is the route information. The causes of an exception travel as `context.previous` (the contract's `exception` has no chain
+field); they count against the context's size caps (at most 50 entries per level, 6 levels).
 
 ### Moving from the Rollbar SDK
 

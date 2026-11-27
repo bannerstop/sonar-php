@@ -353,7 +353,7 @@ final class ErrorReporterTest extends TestCase
         $reporter->reportThrowable($this->thrown());
         $reporter->reportMessage('error', 'x');
 
-        $this->addToAssertionCount(1);
+        self::assertCount(2, glob($this->dir.'/buffer/*.json') ?: []); // a Throwable from the transport counts as no answer: both items wait in the buffer
     }
 
     public function testReportingWhileReportingDoesNotRecurse(): void
@@ -427,6 +427,28 @@ final class ErrorReporterTest extends TestCase
         self::assertSame(42, $body['context']['line']);
     }
 
+    public function testAPreviousErrorHandlerStillRunsAndItsAnswerIsKept(): void
+    {
+        $seen = [];
+        set_error_handler(static function () use (&$seen): void {
+            $seen[] = 'called'; // returns nothing: PHP reads that as handled
+        });
+        $reporter = $this->reporter();
+        $reporter->register();
+        $before = error_reporting(E_ALL);
+        try {
+            $returned = $reporter->handleError(E_WARNING, 'w', __FILE__, 1);
+        } finally {
+            error_reporting($before);
+            $reporter->unregister();
+            restore_error_handler();
+        }
+
+        self::assertSame(['called'], $seen);
+        self::assertTrue($returned);
+        self::assertCount(1, $this->transport->getRequests());
+    }
+
     public function testASilencedOrFilteredPhpErrorIsNotReported(): void
     {
         $reporter = $this->reporter(['errorLevel' => E_ALL & ~E_USER_NOTICE]);
@@ -454,5 +476,31 @@ final class ErrorReporterTest extends TestCase
         self::assertSame('E_ERROR', $body['exception']['class']);
         self::assertSame('Allowed memory size exhausted', $body['exception']['message']);
         self::assertSame(['file' => '/app/src/Big.php', 'line' => 9], $body['exception']['trace'][0]);
+    }
+
+    public function testTheBufferKeepsAtMostTheConfiguredNumberOfItemsAndDropsTheOldest(): void
+    {
+        $this->captureErrorLog($this->dir.'/error.log');
+        $this->transport->failWith('down');
+        $reporter = $this->reporter(['bufferLimit' => 2]);
+
+        foreach (['one', 'two', 'three'] as $message) {
+            $reporter->reportMessage('error', $message);
+            $this->clock->advance(1);
+        }
+        $this->clock->advance(120);
+        $reporter->reportMessage('error', 'four');
+
+        $sent = array_map(function (int $n): string {
+            return $this->body($n)['message'];
+        }, array_keys($this->transport->getRequests()));
+        self::assertSame(['one', 'two', 'three', 'four'], $sent); // the first request failed, 'one' was dropped from the buffer, the rest was resent in order
+    }
+
+    public function testInvalidUtf8InAMessageStillProducesAValidBody(): void
+    {
+        $this->reporter()->reportMessage('error', "broken \xB1 text");
+
+        self::assertIsString($this->body()['message']);
     }
 }

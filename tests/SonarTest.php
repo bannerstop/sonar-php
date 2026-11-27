@@ -200,11 +200,11 @@ final class SonarTest extends TestCase
         putenv('APP_ENV=Production');
         putenv('SONAR_RELEASE=abc123');
 
-        Sonar::reportException(new \RuntimeException('boom'), ['transport' => 'ignored by the context']);
-        Sonar::reset();
         Sonar::errorReporter(['transport' => $transport, 'bufferDir' => $this->dir.'/buffer', 'sapi' => 'cli']);
         Sonar::reportMessage('warning', 'low stock');
+        Sonar::reportException(new \RuntimeException('boom'));
 
+        self::assertCount(2, $transport->getRequests());
         $body = $transport->getRequests()[0]->getJson();
         self::assertSame('https://sonar.example.com/intake/v1/errors', $transport->getRequests()[0]->getUrl());
         self::assertSame('production', $body['environment']);

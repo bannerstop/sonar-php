@@ -41,6 +41,7 @@ final class ErrorReporter
     private const OPTIONS = ['connectTimeout', 'timeout', 'transport', 'bufferDir', 'bufferLimit', 'codeVersion', 'scrub', 'maxItems', 'errorLevel', 'serverName', 'sapi', 'server', 'afterResponse', 'clock'];
     private const LEVELS = ['debug', 'info', 'notice', 'warning', 'error', 'critical'];
     private const FATAL = E_ERROR | E_PARSE | E_CORE_ERROR | E_COMPILE_ERROR;
+    private const E_STRICT_LEVEL = 2048; // E_STRICT is deprecated as a constant since PHP 8.4
     private const MAX_FRAMES = 100;
     private const MAX_CAUSES = 10;
     private const MAX_BODY_BYTES = 200000; // sonar refuses more than 256 KB
@@ -55,7 +56,7 @@ final class ErrorReporter
         E_CORE_ERROR => 'E_CORE_ERROR', E_CORE_WARNING => 'E_CORE_WARNING', E_COMPILE_ERROR => 'E_COMPILE_ERROR',
         E_COMPILE_WARNING => 'E_COMPILE_WARNING', E_USER_ERROR => 'E_USER_ERROR', E_USER_WARNING => 'E_USER_WARNING',
         E_USER_NOTICE => 'E_USER_NOTICE', E_RECOVERABLE_ERROR => 'E_RECOVERABLE_ERROR', E_DEPRECATED => 'E_DEPRECATED',
-        E_USER_DEPRECATED => 'E_USER_DEPRECATED', 2048 => 'E_STRICT',
+        E_USER_DEPRECATED => 'E_USER_DEPRECATED', self::E_STRICT_LEVEL => 'E_STRICT',
     ];
 
     /** @var string */
@@ -172,7 +173,7 @@ final class ErrorReporter
         $this->server = $options['server'] ?? null;
         $this->serverName = $options['serverName'] ?? null;
         $this->maxItems = (int) ($options['maxItems'] ?? 20);
-        $this->errorLevel = (int) ($options['errorLevel'] ?? (E_ALL & ~E_NOTICE & ~E_USER_NOTICE & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~2048));
+        $this->errorLevel = (int) ($options['errorLevel'] ?? (E_ALL & ~E_NOTICE & ~E_USER_NOTICE & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~self::E_STRICT_LEVEL));
         $this->afterResponse = $options['afterResponse'] ?? [new AfterResponse(), 'defer'];
     }
 
@@ -300,7 +301,8 @@ final class ErrorReporter
             // monitoring never breaks the application
         }
 
-        return null !== $this->previousErrorHandler ? (bool) call_user_func($this->previousErrorHandler, $level, $message, $file, $line) : false;
+        // like PHP: only a strict false lets the standard handling go on
+        return null !== $this->previousErrorHandler ? false !== call_user_func($this->previousErrorHandler, $level, $message, $file, $line) : false;
     }
 
     /**

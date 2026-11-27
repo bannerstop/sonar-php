@@ -5,14 +5,14 @@ declare(strict_types=1);
 namespace Bannerstop\Sonar;
 
 /**
- * The on-disk buffer: one JSON file per Pulse (`{"check": ..., "body": {...}}`), named by ranAt so a directory
+ * The on-disk buffer: one JSON file per Pulse or error item (`{"check": ..., "body": {...}}`), named by its time (`ranAt` of a Pulse, `occurredAt` of an error item) so a directory
  * listing is the send order, written to a temporary file and renamed so a crash never leaves half a file.
  *
  * @internal
  */
 final class Buffer
 {
-    public const MAX_AGE = 604800; // 7 days, the oldest ranAt sonar takes
+    public const MAX_AGE = 604800; // 7 days, the oldest time sonar takes
     private const LOCK = '.lock';
     private const RETRY_AFTER = '.retry-after';
     private const STALE_TEMP = 3600;
