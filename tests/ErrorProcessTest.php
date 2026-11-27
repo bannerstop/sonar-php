@@ -66,7 +66,7 @@ final class ErrorProcessTest extends TestCase
         self::assertCount(1, $this->server->getRequests());
     }
 
-    public function testAFatalErrorIsReportedAsCritical(): void
+    public function testACompileTimeFatalErrorIsReportedAsCritical(): void
     {
         $this->server->start();
 
@@ -76,7 +76,7 @@ final class ErrorProcessTest extends TestCase
         self::assertCount(1, $requests);
         $body = json_decode($requests[0]['body'], true);
         self::assertSame('critical', $body['level']);
-        self::assertSame('E_ERROR', $body['exception']['class']);
+        self::assertSame('E_COMPILE_ERROR', $body['exception']['class']);
     }
 
     public function testAnUnreachableSonarDoesNotChangeTheExitCode(): void

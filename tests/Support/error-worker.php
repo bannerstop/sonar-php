@@ -22,8 +22,8 @@ switch ($argv[3]) {
         throw new \RuntimeException('uncaught in the worker');
     case 'fatal':
         \Bannerstop\Sonar\Sonar::registerErrorHandler(['bufferDir' => $argv[2]]);
-        ini_set('memory_limit', '16M');
-        $big = str_repeat('x', 64 * 1024 * 1024);
+        eval('class AlreadyThere {}');
+        eval('class AlreadyThere {}'); // a compile error: not an exception, only error_get_last() sees it
         break;
     case 'caught-and-reported':
         \Bannerstop\Sonar\Sonar::registerErrorHandler(['bufferDir' => $argv[2]]);
