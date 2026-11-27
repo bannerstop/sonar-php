@@ -204,13 +204,26 @@ What is sent, and what never is:
   without its query string.
 - **Never** local variables, argument values, request body, cookies, headers, session or IP address, and no person data
   unless you put it into the context yourself.
-- **Scrubbing at the source.** The value of a context field whose name contains `password`, `secret`, `token`,
-  `apikey`, `authorization`, `cookie`, `credential`, `csrf`, ... or is `email`, `phone`, `firstName`, `userName`, `iban`, ...
-  becomes `[scrubbed]`, at any depth. Add names with the `scrub` option. Objects in the context are sent as
-  `[object Class]`, never dumped. sonar scrubs again on arrival; its list is the one that decides what is kept.
-- **Free text is redacted only for the obvious**: bearer tokens, sonar tokens, `password=...` pairs, credentials in a URL
-  and e-mail addresses in messages. A secret that does not look like one stays; keep secrets out of messages.
-  A URL path is sent as it is, so do not put a secret into a path.
+- **Scrubbing at the source.** The value of a context field whose name looks like a secret becomes `[scrubbed]`, at
+  any depth, and its key stays. The rule works on the name in lower case, letters and digits only (`X-Api-Key` is
+  `xapikey`): a name is scrubbed when it contains `password`, `passwd`, `secret`, `token`, `apikey`, `authorization`,
+  `cookie`, `credential`, `private`, `csrf`, `xsrf`, `session`, `signature`, `jwt` or a personal-data part (`email`,
+  `phone`, `firstName`, `userName`, `iban`, ...), when it starts or ends with `pwd`, `otp`, `dsn` or `salt`, or when it
+  ends with `pass`, `pw`, `auth`, `key` or `keyid` (`DB_PASS`, `MAIL_PWD`, `APP_KEY`, `AWS_ACCESS_KEY_ID`, `SENTRY_DSN`,
+  `SIGNING_SALT`, `JWT`). `keyword`, `monkey`, `bypass` and `cache_key_prefix` are kept. Add names with the `scrub`
+  option. Objects in the context are sent as `[object Class]`, never dumped. sonar scrubs again on arrival with the
+  same rule; its list is the one that decides what is kept.
+- **Secrets are redacted in every string that is sent**, whatever the key: AWS access keys (`AKIA`/`ASIA`), JWTs, PEM
+  private key blocks, `Bearer`/`Basic` credentials, credentials inside a URL, sonar tokens, GitHub (`ghp_`,
+  `github_pat_`), Slack (`xox?-`) and Stripe (`sk_live_`, `sk_test_`) keys, and the value of a `key=value`, `key: value`
+  or `"key":"value"` pair whose key is secret-like. E-mail addresses in messages are redacted too. The net leans
+  to false positives (`Basic information` becomes `Basic [scrubbed]`); keep secrets out of messages anyway. A URL path is redacted by the same patterns, but a secret that does not look like one stays.
+- **The application's own secrets never leave.** When the reporter is built it collects the values of the environment
+  variables (`getenv()`, `$_ENV`, `$_SERVER`) whose name is secret-like by the rule above and that are at least 8
+  characters long (`PWD` and `OLDPWD` excepted), with their URL-encoded forms. Any string that contains one of these
+  values is redacted, under whatever key and inside whatever text, longest value first. The list lives in memory only; it is never
+  sent or stored. A value such as `SESSION_DRIVER=database` is collected as well, so the word `database` is redacted in
+  messages: that is the price. The `env` option replaces the sources (for tests, or to name an environment of your own).
 - **After the response** in a web request (like the runtime report), at once on the command line, with 1 s to connect
   and 2 s in total. A failure is swallowed. An item sonar cannot take (outage, 5xx) waits in a small on-disk buffer
   (at most 100 items, in `sys_get_temp_dir()/sonar-php/errors-<hash>`, option `bufferDir`) and is resent with a later
@@ -222,7 +235,7 @@ What is sent, and what never is:
   upwards are reported (`errorLevel` changes that); `@` is respected. Handled errors go on to the previous handler or PHP's own.
 
 Options of `registerErrorHandler($options)` and `ErrorReporter`: `connectTimeout`, `timeout`, `transport`, `bufferDir`,
-`bufferLimit`, `codeVersion`, `scrub`, `maxItems`, `errorLevel`, `serverName`; for tests `sapi`, `server`, `afterResponse` and `clock`.
+`bufferLimit`, `codeVersion`, `scrub`, `env`, `maxItems`, `errorLevel`, `serverName`; for tests `sapi`, `server`, `afterResponse` and `clock`.
 
 Not done: sonar's contract has no route field and the client cannot know a framework's route template, so the URL path
 is the route information. The causes of an exception travel as `context.previous` (the contract's `exception` has no chain
