@@ -15,8 +15,9 @@ use Bannerstop\Sonar\Transport\Transport;
  * What is sent: the exception class, message and a trace of file, line, function and class (no arguments, no
  * local variables), the causes (`previous`) in the context, level, environment, code version, the server name and,
  * in a web request, only the method and the URL without its query string. No body, cookies, headers or IP address.
- * Context fields whose name looks like a secret or personal data are scrubbed, and obvious secrets in message
- * texts are redacted (see Scrubber); sonar scrubs again on arrival.
+ * Context fields whose name looks like a secret or personal data are scrubbed, and secrets in any string that is sent
+ * are redacted: strings of a secret's shape, `key=value` pairs and the values of the application's own secret
+ * environment variables, collected when the reporter is built and never sent (see Scrubber). sonar scrubs again on arrival.
  *
  * In a web request items go out after the response (like the runtime report), on the command line at once.
  * An item sonar cannot take now is kept in a small on-disk buffer and resent with a later report. A local rate
@@ -31,6 +32,7 @@ use Bannerstop\Sonar\Transport\Transport;
  * - bufferLimit (int, 100): the most items kept; the oldest are dropped beyond it
  * - codeVersion (string): the revision the application runs, e.g. a Git SHA
  * - scrub (list of strings): more field names to scrub, on top of the built-in list
+ * - env (array<string, string>): the environment whose secrets are redacted; by default getenv(), $_ENV and $_SERVER
  * - maxItems (int, 20): the most items one process sends
  * - errorLevel (int): the PHP error levels `register()` reports, by default warnings and worse (no notices, no deprecations)
  * - serverName (string): defaults to gethostname()
@@ -38,7 +40,7 @@ use Bannerstop\Sonar\Transport\Transport;
  */
 final class ErrorReporter
 {
-    private const OPTIONS = ['connectTimeout', 'timeout', 'transport', 'bufferDir', 'bufferLimit', 'codeVersion', 'scrub', 'maxItems', 'errorLevel', 'serverName', 'sapi', 'server', 'afterResponse', 'clock'];
+    private const OPTIONS = ['connectTimeout', 'timeout', 'transport', 'bufferDir', 'bufferLimit', 'codeVersion', 'scrub', 'env', 'maxItems', 'errorLevel', 'serverName', 'sapi', 'server', 'afterResponse', 'clock'];
     private const LEVELS = ['debug', 'info', 'notice', 'warning', 'error', 'critical'];
     private const FATAL = E_ERROR | E_PARSE | E_CORE_ERROR | E_COMPILE_ERROR;
     private const E_STRICT_LEVEL = 2048; // E_STRICT is deprecated as a constant since PHP 8.4
@@ -157,7 +159,6 @@ final class ErrorReporter
         $this->url = rtrim(trim($url), '/');
         $this->token = $token;
         $this->environment = $environment;
-        $this->codeVersion = isset($options['codeVersion']) ? Scrubber::cut((string) $options['codeVersion'], 100) : null;
         $this->clock = $options['clock'] ?? static function (): \DateTimeImmutable {
             return new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
         };
@@ -168,10 +169,14 @@ final class ErrorReporter
             $this->clock,
             'occurredAt'
         );
-        $this->scrubber = new Scrubber(array_values(array_map('strval', $options['scrub'] ?? [])));
         $this->sapi = $options['sapi'] ?? ('cli' === PHP_SAPI || 'phpdbg' === PHP_SAPI ? 'cli' : 'web');
         $this->server = $options['server'] ?? null;
+        $this->scrubber = new Scrubber(
+            array_values(array_map('strval', $options['scrub'] ?? [])),
+            Scrubber::secretValues(isset($options['env']) ? [(array) $options['env']] : [(array) getenv(), $_ENV, $this->server ?? $_SERVER])
+        );
         $this->serverName = $options['serverName'] ?? null;
+        $this->codeVersion = isset($options['codeVersion']) ? Scrubber::cut($this->scrubber->redact((string) $options['codeVersion']), 100) : null;
         $this->maxItems = (int) ($options['maxItems'] ?? 20);
         $this->errorLevel = (int) ($options['errorLevel'] ?? (E_ALL & ~E_NOTICE & ~E_USER_NOTICE & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~self::E_STRICT_LEVEL));
         $this->afterResponse = $options['afterResponse'] ?? [new AfterResponse(), 'defer'];
@@ -337,7 +342,7 @@ final class ErrorReporter
             $item['exception'] = [
                 'class' => self::ERROR_LABELS[$error['type']] ?? 'E_ERROR',
                 'message' => $this->scrubber->text($error['message'], 2000),
-                'trace' => [self::frame($error['file'], $error['line'])],
+                'trace' => [$this->frame($error['file'], $error['line'])],
             ];
             $this->submit($item, implode('|', ['fatal', $item['exception']['message'], $error['file'], $error['line']]));
         } catch (\Throwable $dropped) {
@@ -365,7 +370,7 @@ final class ErrorReporter
         $fingerprint = $context['fingerprint'] ?? null;
         unset($context['fingerprint']);
 
-        return is_string($fingerprint) && '' !== $fingerprint ? Scrubber::cut($fingerprint, 200) : null;
+        return is_string($fingerprint) && '' !== $fingerprint ? Scrubber::cut($this->scrubber->redact($fingerprint), 200) : null;
     }
 
     /**
@@ -406,12 +411,12 @@ final class ErrorReporter
         if (!is_string($method) || '' === $method) {
             return [];
         }
-        $request = ['method' => Scrubber::cut($method, 16)];
+        $request = ['method' => Scrubber::cut($this->scrubber->redact($method), 16)];
         $host = $server['HTTP_HOST'] ?? $server['SERVER_NAME'] ?? null;
         $path = is_string($server['REQUEST_URI'] ?? null) ? parse_url($server['REQUEST_URI'], PHP_URL_PATH) : null;
         if (is_string($host) && preg_match('/^[A-Za-z0-9.:\[\]-]{1,255}$/', $host) && is_string($path)) {
             $https = isset($server['HTTPS']) && '' !== $server['HTTPS'] && 'off' !== $server['HTTPS'];
-            $request['url'] = Scrubber::cut(($https ? 'https' : 'http').'://'.$host.$path, 2000);
+            $request['url'] = Scrubber::cut($this->scrubber->redact(($https ? 'https' : 'http').'://'.$host.$path), 2000);
         }
 
         return $request;
@@ -422,13 +427,13 @@ final class ErrorReporter
      */
     private function exception(\Throwable $e): array
     {
-        $trace = [self::frame($e->getFile(), $e->getLine())];
+        $trace = [$this->frame($e->getFile(), $e->getLine())];
         foreach ($e->getTrace() as $frame) {
-            $trace[] = self::frame(is_string($frame['file'] ?? null) ? $frame['file'] : null, (int) ($frame['line'] ?? 0), $frame['function'], $frame['class'] ?? null);
+            $trace[] = $this->frame(is_string($frame['file'] ?? null) ? $frame['file'] : null, (int) ($frame['line'] ?? 0), $frame['function'], $frame['class'] ?? null);
         }
 
         return [
-            'class' => Scrubber::cut(Scrubber::className($e), 255),
+            'class' => Scrubber::cut($this->scrubber->redact(Scrubber::className($e)), 255),
             'message' => $this->scrubber->text($e->getMessage(), 2000),
             'trace' => array_slice($trace, 0, self::MAX_FRAMES),
         ];
@@ -437,18 +442,18 @@ final class ErrorReporter
     /**
      * @return array<string, mixed>
      */
-    private static function frame(?string $file, int $line, ?string $function = null, ?string $class = null): array
+    private function frame(?string $file, int $line, ?string $function = null, ?string $class = null): array
     {
         $frame = [];
         if (null !== $file) {
-            $frame['file'] = Scrubber::cut($file, 500);
+            $frame['file'] = Scrubber::cut($this->scrubber->redact($file), 500);
             $frame['line'] = max(0, $line);
         }
         if (null !== $function) {
-            $frame['function'] = Scrubber::cut($function, 255);
+            $frame['function'] = Scrubber::cut($this->scrubber->redact($function), 255);
         }
         if (null !== $class) {
-            $frame['class'] = Scrubber::cut($class, 255);
+            $frame['class'] = Scrubber::cut($this->scrubber->redact($class), 255);
         }
 
         return $frame;
