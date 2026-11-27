@@ -210,8 +210,8 @@ final class Scrubber
      */
     private function pairs(string $text): string
     {
-        $key = '/(["\'\[]?)([A-Za-z0-9_.-]+)(["\'\]]?)(\s*(?:=>|[=:])\s*)/';
-        $value = '/\G(\[scrubbed\]|"(?:[^"\\\\]|\\\\.)*"|\'[^\']*\'|"[^\r\n]*|\'[^\r\n]*|[^\s,;&"\'\]}]+)/';
+        $key = '/(\\\\?["\'\[]?)([A-Za-z0-9_.-]+)(\\\\?["\'\]]?)(\s*(?:=>|[=:])\s*)/';
+        $value = '/\G(\[scrubbed\]|\\\\"(?:(?!\\\\").)*\\\\"|"(?:[^"\\\\]|\\\\.)*"|\'[^\']*\'|"[^\r\n]*|\'[^\r\n]*|[^\s"\'\]}]+)/';
         $out = '';
         $pos = 0;
         while (preg_match($key, $text, $m, PREG_OFFSET_CAPTURE, $pos)) {
@@ -221,8 +221,9 @@ final class Scrubber
             if (!$this->isSensitive($m[2][0]) || !preg_match($value, $text, $v, 0, $end)) {
                 continue;
             }
-            $quote = $v[1][0];
-            $out .= '"' === $quote || "'" === $quote ? $quote.self::REPLACEMENT.(strlen($v[1]) > 1 && substr($v[1], -1) === $quote ? $quote : '') : self::REPLACEMENT;
+            $quote = 0 === strpos($v[1], '\\"') ? '\\"' : substr($v[1], 0, 1);
+            $closed = strlen($v[1]) >= 2 * strlen($quote) && substr($v[1], -strlen($quote)) === $quote;
+            $out .= in_array($quote, ['"', "'", '\\"'], true) ? $quote.self::REPLACEMENT.($closed ? $quote : '') : self::REPLACEMENT;
             $pos = $end + strlen($v[1]);
         }
 
