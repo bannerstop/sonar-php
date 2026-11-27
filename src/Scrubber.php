@@ -54,7 +54,8 @@ final class Scrubber
         '/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/' => self::REPLACEMENT,
         '/(?:AKIA|ASIA)[A-Z0-9]{16}/' => self::REPLACEMENT,
         '/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/=-]{6,}/i' => '$1 '.self::REPLACEMENT,
-        '#([a-z][a-z0-9+.-]*://)[^\s/@:]*:[^\s/]*@#i' => '$1'.self::REPLACEMENT.'@',
+        // the whole user info: up to the last @ of the run, so a password may hold / : + % # ?
+        '#([a-z][a-z0-9+.-]*://)[^\s]*@#i' => '$1'.self::REPLACEMENT.'@',
         '/sonar_[a-z]+_[A-Za-z0-9]+/' => self::REPLACEMENT,
         '/(?:gh[pousr]_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{10,})/' => self::REPLACEMENT,
         '/(?:xox[a-z]|xapp)-[A-Za-z0-9-]{8,}/' => self::REPLACEMENT,
