@@ -1,0 +1,27 @@
+name: release notify
+
+# A version tag vX.Y.Z is a release (Packagist picks it up by itself): this posts it to Rocket.Chat #ci_cd.
+# Needs the repository secret ROCKETCHAT_WEBHOOK (incoming webhook URL); without it the step does nothing. Tags are pushed
+# by maintainers only, so the secret never reaches a fork's run.
+on:
+  push:
+    tags: [ "v[0-9]+.[0-9]+.[0-9]+" ]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post to Rocket.Chat
+        env:
+          WEBHOOK: ${{ secrets.ROCKETCHAT_WEBHOOK }}
+          TAG: ${{ github.ref_name }}
+          CHANGELOG_URL: ${{ github.server_url }}/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md
+        run: |
+          [ -n "$WEBHOOK" ] || { echo "ROCKETCHAT_WEBHOOK not set, skipping"; exit 0; }
+          # The values are a version tag and URLs: no quotes or backslashes to escape.
+          payload=$(printf '{"channel":"ci_cd","username":"github-actions","emoji":":package:","text":"bannerstop/sonar-php","attachments":[{"text":"sonar-php *%s* released: `composer require bannerstop/sonar-php:^%s`\\n<%s|Changelog> · <https://packagist.org/packages/bannerstop/sonar-php|Packagist>","color":"#00c100"}]}' "$TAG" "${TAG#v}" "$CHANGELOG_URL")
+          curl -fsS --max-time 20 -H 'Content-Type: application/json' -d "$payload" "$WEBHOOK" > /dev/null
