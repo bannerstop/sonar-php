@@ -17,6 +17,9 @@ final class Sonar
     /** @var bool */
     private static $loggedNotConfigured = false;
 
+    /** @var ErrorReporter|null */
+    private static $errorReporter;
+
     /**
      * Builds the client explicitly. Without a URL or token the environment variables SONAR_URL and SONAR_TOKEN are
      * used; SONAR_BUFFER_DIR sets the `bufferDir` option when the options do not.
@@ -93,6 +96,96 @@ final class Sonar
         }
     }
 
+    /**
+     * Registers the handlers that report uncaught exceptions, PHP errors and fatal errors to sonar (see
+     * ErrorReporter). Call it early in the bootstrap, once. Reads SONAR_URL, SONAR_TOKEN and the environment from
+     * SONAR_ENVIRONMENT (or APP_ENV); SONAR_RELEASE is the code version unless `codeVersion` is an option. Never
+     * throws; with neither SONAR_URL nor SONAR_TOKEN set it does nothing, with other things missing it logs once.
+     *
+     * @param array<string, mixed> $options see ErrorReporter
+     */
+    public static function registerErrorHandler(array $options = []): ?ErrorReporter
+    {
+        $reporter = self::errorReporter($options);
+        if (null !== $reporter) {
+            try {
+                $reporter->register();
+            } catch (\Throwable $e) {
+                Log::error($e->getMessage());
+            }
+        }
+
+        return $reporter;
+    }
+
+    /**
+     * Reports an exception you caught and handled, with extra context. Never throws.
+     *
+     * @param array<string, mixed> $context a `fingerprint` is your own grouping key
+     */
+    public static function reportException(\Throwable $e, array $context = []): void
+    {
+        $reporter = self::errorReporter();
+        if (null !== $reporter) {
+            $reporter->reportThrowable($e, $context);
+        }
+    }
+
+    /**
+     * Reports a message. Never throws.
+     *
+     * @param string               $level   debug, info, notice, warning, error or critical
+     * @param array<string, mixed> $context
+     */
+    public static function reportMessage(string $level, string $message, array $context = []): void
+    {
+        $reporter = self::errorReporter();
+        if (null !== $reporter) {
+            $reporter->reportMessage($level, $message, $context);
+        }
+    }
+
+    /**
+     * The reporter the facade uses (built from the environment on first use), for a Monolog `SonarHandler`.
+     * Null when sonar is not configured.
+     *
+     * @param array<string, mixed> $options see ErrorReporter, used only when the reporter is built
+     */
+    public static function errorReporter(array $options = []): ?ErrorReporter
+    {
+        if (null !== self::$errorReporter) {
+            return self::$errorReporter;
+        }
+        try {
+            $url = getenv('SONAR_URL');
+            $token = getenv('SONAR_TOKEN');
+            if (false === $url && false === $token) {
+                return null; // not set up: an environment without sonar (a developer's machine) stays quiet
+            }
+            $problem = 'SONAR_URL, SONAR_TOKEN and SONAR_ENVIRONMENT (or APP_ENV) are needed to report errors.';
+            $environment = getenv('SONAR_ENVIRONMENT');
+            if (false === $environment || '' === $environment) {
+                $environment = getenv('APP_ENV');
+            }
+            if (false === $environment || '' === $environment) {
+                throw new \InvalidArgumentException($problem);
+            }
+            $release = getenv('SONAR_RELEASE');
+            if (!isset($options['codeVersion']) && false !== $release && '' !== $release) {
+                $options['codeVersion'] = $release;
+            }
+
+            return self::$errorReporter = new ErrorReporter(self::env('SONAR_URL', $problem), self::env('SONAR_TOKEN', $problem), strtolower($environment), $options);
+        } catch (\Throwable $e) {
+            if (!self::$loggedNotConfigured) {
+                self::$loggedNotConfigured = true;
+                Log::error($e->getMessage());
+            }
+
+            return null;
+        }
+    }
+
     public static function flush(int $maxPulses = PHP_INT_MAX, ?float $maxSeconds = null): ?FlushResult
     {
         $client = self::tryClient();
@@ -105,6 +198,10 @@ final class Sonar
      */
     public static function reset(): void
     {
+        if (null !== self::$errorReporter) {
+            self::$errorReporter->unregister();
+        }
+        self::$errorReporter = null;
         self::$client = null;
         self::$loggedNotConfigured = false;
     }

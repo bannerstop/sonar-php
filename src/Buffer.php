@@ -5,14 +5,14 @@ declare(strict_types=1);
 namespace Bannerstop\Sonar;
 
 /**
- * The on-disk buffer: one JSON file per Pulse (`{"check": ..., "body": {...}}`), named by ranAt so a directory
+ * The on-disk buffer: one JSON file per Pulse or error item (`{"check": ..., "body": {...}}`), named by its time (`ranAt` of a Pulse, `occurredAt` of an error item) so a directory
  * listing is the send order, written to a temporary file and renamed so a crash never leaves half a file.
  *
  * @internal
  */
 final class Buffer
 {
-    public const MAX_AGE = 604800; // 7 days, the oldest ranAt sonar takes
+    public const MAX_AGE = 604800; // 7 days, the oldest time sonar takes
     private const LOCK = '.lock';
     private const RETRY_AFTER = '.retry-after';
     private const STALE_TEMP = 3600;
@@ -26,18 +26,23 @@ final class Buffer
     /** @var callable(): \DateTimeImmutable */
     private $clock;
 
+    /** @var string */
+    private $timeField;
+
     /**
      * @param callable(): \DateTimeImmutable $clock
+     * @param string                         $timeField the body field that holds the time an entry counts at
      */
-    public function __construct(string $dir, int $limit, callable $clock)
+    public function __construct(string $dir, int $limit, callable $clock, string $timeField = 'ranAt')
     {
         $this->dir = $dir;
         $this->limit = $limit;
         $this->clock = $clock;
+        $this->timeField = $timeField;
     }
 
     /**
-     * @param array<string, mixed> $body the Pulse body, with `id` and `ranAt`
+     * @param array<string, mixed> $body the body, with the time field (`ranAt` for Pulses); an `id` names the file
      *
      * @throws \RuntimeException when the file cannot be written
      */
@@ -47,7 +52,7 @@ final class Buffer
             throw new \RuntimeException(sprintf('The buffer directory %s cannot be created.', $this->dir));
         }
         $json = Json::encode(['check' => $check, 'body' => $body]);
-        $name = $ranAt->setTimezone(new \DateTimeZone('UTC'))->format('Ymd\THisu').'-'.$body['id'].'.json';
+        $name = $ranAt->setTimezone(new \DateTimeZone('UTC'))->format('Ymd\THisu').'-'.($body['id'] ?? bin2hex(random_bytes(8))).'.json';
         $temp = $this->dir.'/.'.bin2hex(random_bytes(6)).'.tmp';
         if (false === @file_put_contents($temp, $json) || !@rename($temp, $this->dir.'/'.$name)) {
             @unlink($temp);
@@ -167,7 +172,8 @@ final class Buffer
         if (!$entry instanceof \stdClass || !is_string($entry->check ?? null) || !($entry->body ?? null) instanceof \stdClass) {
             return null;
         }
-        $ranAt = is_string($entry->body->ranAt ?? null) ? date_create_immutable($entry->body->ranAt) : false;
+        $time = $entry->body->{$this->timeField} ?? null;
+        $ranAt = is_string($time) ? date_create_immutable($time) : false;
         if (false === $ranAt) {
             return null;
         }

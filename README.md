@@ -8,7 +8,9 @@ ran. It is made for crons and other jobs that must never be slowed down or broke
   its original time and id, so sonar judges the run when it happened and counts it once.
 - **Reports its own PHP runtime**: one line in the bootstrap tells sonar which PHP version an application really runs
   with, for web requests and the command line separately (see [The application's runtime](#the-applications-runtime)).
-- **No dependencies**: PHP 7.2 or newer and `ext-json`. No Guzzle, no PSR packages, no Symfony. Use ext-curl, a
+- **Reports errors**: an error and exception handler and a Monolog handler send to sonar's error intake (see
+  [Errors](#errors-handlers-and-monolog)), scrubbed at the source.
+- **No required dependencies**: PHP 7.2 or newer and `ext-json`. No Guzzle, no PSR packages, no Symfony. Use ext-curl, a
   stream fallback, or your framework's PSR-18 client.
 
 ## Installation
@@ -154,6 +156,104 @@ $reporter = new \Bannerstop\Sonar\RuntimeReporter($url, $token, 'checkout', ['re
 $reporter->reportIfDue();
 ```
 
+## Errors: handlers and Monolog
+
+New code needs no Rollbar SDK: this package reports errors to the native error intake of sonar
+(`POST /intake/v1/errors`) with the same URL, token, transports, timeouts and "never throws" rule as the Pulses.
+
+```bash
+SONAR_URL=https://sonar.example.com
+SONAR_TOKEN=...            # the token of the Project (sonar_pls_...), as for the runtime report
+SONAR_ENVIRONMENT=production   # or APP_ENV; lower case, e.g. production, staging
+SONAR_RELEASE=9fceb02      # optional: the revision the application runs
+```
+
+```php
+\Bannerstop\Sonar\Sonar::registerErrorHandler();   // uncaught exceptions, PHP errors, fatal errors
+
+try { $order->charge(); } catch (PaymentFailed $e) {
+    \Bannerstop\Sonar\Sonar::reportException($e, ['order' => $order->id(), 'fingerprint' => 'checkout-payment']);
+}
+\Bannerstop\Sonar\Sonar::reportMessage('warning', 'Stock is low', ['sku' => 'A-1']);
+```
+
+Call `registerErrorHandler()` once, early in the bootstrap (after the autoloader), like `reportRuntime()`. The handlers that
+were registered before (Symfony's, Laravel's) still run afterwards. Without a previous exception handler the process
+ends the way PHP ends it (message on stderr or in the error log, exit code 255, a `500` on the web). With neither
+`SONAR_URL` nor `SONAR_TOKEN` set it does nothing, silently. To wire it yourself, build
+`new \Bannerstop\Sonar\ErrorReporter($url, $token, $environment, $options)` and call `register()`.
+
+**Monolog** (2 and 3; `monolog/monolog` is only suggested, never required):
+
+```php
+use Bannerstop\Sonar\Monolog\SonarHandler;
+use Bannerstop\Sonar\Sonar;
+
+$logger->pushHandler(new SonarHandler(Sonar::errorReporter(), 'warning'));   // level number, name or Monolog 3 Level
+```
+
+A record becomes a `log` item. At `error` or above, an `exception` in the context makes an `error` item with that
+exception and the record's message as `context.logMessage`. The channel is added to the context; Monolog's `extra`
+is not sent. With Symfony, register the handler as a service tagged `monolog.handler`; with Laravel add it in a custom
+`monolog` channel. Monolog 1 is not supported.
+
+What is sent, and what never is:
+
+- The exception class, message and a trace of file, line, function and class, the causes (`previous`) in the
+  context, level, environment, code version and the server name. In a web request only the method and the URL
+  without its query string.
+- **Never** local variables, argument values, request body, cookies, headers, session or IP address, and no person data
+  unless you put it into the context yourself.
+- **Scrubbing at the source.** The value of a context field whose name contains `password`, `secret`, `token`,
+  `apikey`, `authorization`, `cookie`, `credential`, `csrf`, ... or is `email`, `phone`, `firstName`, `userName`, `iban`, ...
+  becomes `[scrubbed]`, at any depth. Add names with the `scrub` option. Objects in the context are sent as
+  `[object Class]`, never dumped. sonar scrubs again on arrival; its list is the one that decides what is kept.
+- **Free text is redacted only for the obvious**: bearer tokens, sonar tokens, `password=...` pairs, credentials in a URL
+  and e-mail addresses in messages. A secret that does not look like one stays; keep secrets out of messages.
+  A URL path is sent as it is, so do not put a secret into a path.
+- **After the response** in a web request (like the runtime report), at once on the command line, with 1 s to connect
+  and 2 s in total. A failure is swallowed. An item sonar cannot take (outage, 5xx) waits in a small on-disk buffer
+  (at most 100 items, in `sys_get_temp_dir()/sonar-php/errors-<hash>`, option `bufferDir`) and is resent with a later
+  report; while sonar is down later items do not wait on another timeout. `sonar-flush` resends Pulses only.
+- **Rate guard.** At most 20 items per process (`maxItems`), the same error at most 3 times per process, and the answer
+  `429` drops the item and holds all sending back until its `Retry-After` is over.
+- **No recursion.** An error raised while reporting is dropped, never reported.
+- Fatal errors at shutdown (out of memory included) are reported as `critical`. By default PHP errors from warnings
+  upwards are reported (`errorLevel` changes that); `@` is respected. Handled errors go on to the previous handler or PHP's own.
+
+Options of `registerErrorHandler($options)` and `ErrorReporter`: `connectTimeout`, `timeout`, `transport`, `bufferDir`,
+`bufferLimit`, `codeVersion`, `scrub`, `maxItems`, `errorLevel`, `serverName`; for tests `sapi`, `server`, `afterResponse` and `clock`.
+
+Not done: sonar's contract has no route field and the client cannot know a framework's route template, so the URL path
+is the route information. The causes of an exception travel as `context.previous` (the contract's `exception` has no chain
+field); they count against the context's size caps (at most 50 entries per level, 6 levels).
+
+### Moving from the Rollbar SDK
+
+If a repo already reports to Rollbar, the easier move is sonar's Rollbar-compatible endpoint (change the client's
+`endpoint` and token). This section is for new code or a repo you touch anyway. Check the names against your SDK version.
+
+| Rollbar                                  | sonar-php                                                                                  |
+|------------------------------------------|--------------------------------------------------------------------------------------------|
+| `access_token`                           | `SONAR_TOKEN`, the `sonar_pls_` token of the Project (not the 32-character error token)    |
+| `endpoint`                               | `SONAR_URL`, the base URL of sonar                                                         |
+| `environment`                            | `SONAR_ENVIRONMENT` or `APP_ENV` (lower case)                                              |
+| `code_version`                           | `SONAR_RELEASE` or the `codeVersion` option                                                |
+| `host`                                   | `serverName`                                                                               |
+| `scrub_fields`                           | `scrub`, on top of the built-in names                                                      |
+| `included_errno`                         | `errorLevel` (default: warnings and worse)                                                 |
+| `timeout`                                | `timeout` and `connectTimeout`                                                             |
+| `custom`                                 | the context of `reportException()` / `reportMessage()`                                     |
+| `fingerprint`                            | `fingerprint` in that context                                                              |
+| `Rollbar::log(Level::WARNING, ...)`      | `Sonar::reportMessage('warning', ...)`                                                     |
+| `Rollbar::report_exception($e)`          | `Sonar::reportException($e)`                                                               |
+| `RollbarHandler` (Monolog)               | `SonarHandler`                                                                             |
+| `handler` blocking / agent               | not an option: after the response on the web, at once on the command line                  |
+| `person`, `capture_ip`, `capture_email`, `capture_username` | not sent; add what you need to the context yourself                |
+| local variables, `include_error_code_context` | never sent                                                                            |
+| `enabled`                                | leave `SONAR_URL` unset                                                                    |
+| `check_ignore`, `filter`, `transformer`  | not supported: do not call the report, or filter in your Monolog handler stack             |
+
 ## Configuration
 
 `Sonar` builds one client on first use from `SONAR_URL`, `SONAR_TOKEN` and optionally `SONAR_BUFFER_DIR`. To configure it explicitly (or to wire a
@@ -258,7 +358,11 @@ client generates), `ranAt` (ISO 8601 with offset, set when the job ran), `status
 `duration`, `values` and `log`. The check name is URL-encoded.
 
 The runtime report is `POST {SONAR_URL}/intake/v1/runtime` with the same `Authorization: Bearer` header and the body
-`{"service": "checkout", "sapi": "web", "php": "8.3.12", "package": "1.1.0"}`; sonar answers 2xx when it stored it.
+`{"service": "checkout", "sapi": "web", "php": "8.3.12", "package": "1.2.0"}`; sonar answers 2xx when it stored it.
+
+The error report is `POST {SONAR_URL}/intake/v1/errors` with the same header and an `ErrorItem` body: `type` (`error` or
+`log`), `environment`, `occurredAt`, `level`, `exception` (`class`, `message`, `trace`) or `message`, `request`
+(`method`, `url`), `context`, `fingerprint` and `codeVersion`; sonar answers `202`.
 
 ## Development
 

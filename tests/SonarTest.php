@@ -26,6 +26,9 @@ final class SonarTest extends TestCase
         Sonar::reset();
         putenv('SONAR_URL');
         putenv('SONAR_TOKEN');
+        putenv('SONAR_ENVIRONMENT');
+        putenv('APP_ENV');
+        putenv('SONAR_RELEASE');
         $this->dir = TempDir::create();
     }
 
@@ -34,6 +37,9 @@ final class SonarTest extends TestCase
         Sonar::reset();
         putenv('SONAR_URL');
         putenv('SONAR_TOKEN');
+        putenv('SONAR_ENVIRONMENT');
+        putenv('APP_ENV');
+        putenv('SONAR_RELEASE');
         $this->releaseErrorLog();
         TempDir::remove($this->dir);
     }
@@ -184,5 +190,47 @@ final class SonarTest extends TestCase
         Sonar::reportRuntime();
 
         self::assertSame(1, substr_count($this->capturedErrorLog(), 'SONAR_SERVICE'));
+    }
+
+    public function testErrorsAreReportedFromTheEnvironment(): void
+    {
+        $transport = new InMemoryTransport();
+        putenv('SONAR_URL=https://sonar.example.com');
+        putenv('SONAR_TOKEN=env-token');
+        putenv('APP_ENV=Production');
+        putenv('SONAR_RELEASE=abc123');
+
+        Sonar::errorReporter(['transport' => $transport, 'bufferDir' => $this->dir.'/buffer', 'sapi' => 'cli']);
+        Sonar::reportMessage('warning', 'low stock');
+        Sonar::reportException(new \RuntimeException('boom'));
+
+        self::assertCount(2, $transport->getRequests());
+        $body = $transport->getRequests()[0]->getJson();
+        self::assertSame('https://sonar.example.com/intake/v1/errors', $transport->getRequests()[0]->getUrl());
+        self::assertSame('production', $body['environment']);
+        self::assertSame('abc123', $body['codeVersion']);
+        self::assertSame('low stock', $body['message']);
+    }
+
+    public function testWithoutAnySonarSettingsErrorReportingIsSilent(): void
+    {
+        $this->captureErrorLog($this->dir.'/php-error.log');
+
+        self::assertNull(Sonar::registerErrorHandler());
+        Sonar::reportException(new \RuntimeException('boom'));
+
+        self::assertSame('', $this->capturedErrorLog());
+    }
+
+    public function testAMissingEnvironmentIsLoggedOnceAndNeverThrows(): void
+    {
+        $this->captureErrorLog($this->dir.'/php-error.log');
+        putenv('SONAR_URL=https://sonar.example.com');
+        putenv('SONAR_TOKEN=env-token');
+
+        self::assertNull(Sonar::registerErrorHandler());
+        Sonar::reportMessage('error', 'x');
+
+        self::assertSame(1, substr_count($this->capturedErrorLog(), 'SONAR_ENVIRONMENT'));
     }
 }

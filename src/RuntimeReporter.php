@@ -27,7 +27,7 @@ use Bannerstop\Sonar\Transport\Transport;
  */
 final class RuntimeReporter
 {
-    public const PACKAGE_VERSION = '1.1.0';
+    public const PACKAGE_VERSION = '1.2.0';
     private const PERIOD = 86400;       // reported again after a day (sonar drops a value after 3 days)
     private const RETRY = 900;          // a failed report is tried again after 15 minutes
     private const LOG_EVERY = 86400;    // a failure is logged once a day
