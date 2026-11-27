@@ -227,23 +227,13 @@ final class SonarClient
      */
     private function backOff(TransportResponse $response): void
     {
-        $header = $response->getHeader('Retry-After');
-        if (null === $header || '' === trim($header)) {
-            return;
-        }
-        $header = trim($header);
         $now = $this->buffer->now();
-        if (ctype_digit($header)) {
-            $wait = (float) $header;
-        } else {
-            $date = strtotime($header);
-            $wait = false === $date ? 0.0 : $date - $now;
-        }
+        $wait = RetryAfter::seconds($response->getHeader('Retry-After'), $now, self::MAX_RETRY_AFTER);
         if ($wait <= 0) {
             return;
         }
         try {
-            $this->buffer->backOffUntil($now + min($wait, self::MAX_RETRY_AFTER));
+            $this->buffer->backOffUntil($now + $wait);
         } catch (\Throwable $e) {
             Log::error('Retry-After could not be stored: '.$e->getMessage());
         }
